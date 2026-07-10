@@ -44,7 +44,7 @@ import { resolve, extname, basename, relative } from "node:path";
 import ignore from "ignore";
 
 import { RST, B, D, GREEN, CYAN } from "./constants.ts";
-import { getRagDir, GLOBAL_RAG_DIR } from "./store.ts";
+import { setRagDirGetter, getRagDir, GLOBAL_RAG_DIR } from "./store.ts";
 import { loadConfig, saveConfig, normalizeExt, resolveExtensions } from "./config.ts";
 import { getDbConn, closeDbConn, getIndexedFiles, getEmbeddedCount, saveIndex, getIndexStats } from "./db.ts";
 import { collectFiles, collectFromTracked, collectFromTrackedAsync, isExcludedByConfig } from "./chunking.ts";
@@ -129,6 +129,13 @@ export default function (pi: ExtensionAPI) {
         },
       };
   });
+
+  pi.registerFlag("rag-dir", {
+    description: "Directory to store the RAG index database",
+    type: "string",
+  });
+
+  setRagDirGetter(() => pi.getFlag("rag-dir") as string | undefined);
 
   pi.on("session_shutdown", async (_event, _ctx) => {
     closeDbConn();

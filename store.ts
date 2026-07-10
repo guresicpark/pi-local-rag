@@ -8,17 +8,32 @@ export const LEGACY_DIR = process.env.PI_RAG_LEGACY_DIR ?? join(homedir(), ".pi"
 /** Global fallback store. Lazily evaluated so tests can override $HOME. */
 export const GLOBAL_RAG_DIR = () => join(homedir(), ".pi", "rag");
 
+// CLI flag override — set once at startup via setRagDir(), wins over everything.
+let _ragDirGetter: (() => string | undefined) | undefined;
+
+export function setRagDirGetter(getter: () => string | undefined): void {
+  _ragDirGetter = getter;
+}
+
 /**
  * Resolve the active RAG store directory for the current cwd.
  *
- * 1. `$PI_RAG_DIR` — explicit override, wins over everything.
- * 2. Walk upward from `process.cwd()` looking for an existing `.pi/rag/`,
+ * 1. `--rag-dir` CLI flag — explicit override, wins over everything.
+ * 2. `$PI_RAG_DIR` — environment variable override.
+ * 3. Walk upward from `process.cwd()` looking for an existing `.pi/rag/`,
  *    stopping before `homedir()` so the global store at `~/.pi/rag/` is only
  *    reached as an explicit fallback (not via walk-up).
- * 3. With `createIfMissing`, create `${cwd}/.pi/rag/`.
- * 4. Otherwise, fall back to `${homedir()}/.pi/rag/`.
+ * 4. With `createIfMissing`, create `${cwd}/.pi/rag/`.
+ * 5. Otherwise, fall back to `${homedir()}/.pi/rag/`.
  */
 export function getRagDir(opts: { createIfMissing?: boolean } = {}): string {
+  // CLI flag takes highest priority
+  // Check getter first — resolves lazily on first actual use
+  const flagDir = _ragDirGetter?.();
+  if (flagDir) {
+    if (!existsSync(flagDir)) mkdirSync(flagDir, { recursive: true });
+    return flagDir;
+  }
   const override = process.env.PI_RAG_DIR;
   if (override) {
     if (!existsSync(override)) mkdirSync(override, { recursive: true });

@@ -13,7 +13,6 @@ export interface Chunk {
   hash: string;
   indexed: string;
   tokens: number;
-  vector?: number[];
 }
 
 interface FileDbEntry {
@@ -176,17 +175,13 @@ function migrateFromJson(db: Database.Database, jsonPath: string): void {
       INSERT INTO chunks(id, file_path, chunk_content, line_start, line_end, chunk_hash, indexed_at, tokens)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    const insVec = db.prepare("INSERT INTO chunks_vec(rowid, embedding) VALUES (CAST(? AS INTEGER), ?)");
     const insFile = db.prepare(`
       INSERT OR REPLACE INTO files(path, hash, chunks, indexed, size, embedded)
       VALUES (?, ?, ?, ?, ?, ?)
     `);
 
     for (const c of data.chunks) {
-      const chunkResult = insChunk.run(c.id, c.file, c.content, c.lineStart, c.lineEnd, c.hash, c.indexed, c.tokens);
-      if (c.vector && c.vector.length === VECTOR_DIM) {
-        insVec.run(Number(chunkResult.lastInsertRowid), float32ToBuffer(c.vector));
-      }
+      insChunk.run(c.id, c.file, c.content, c.lineStart, c.lineEnd, c.hash, c.indexed, c.tokens);
     }
 
     for (const [fp, info] of Object.entries(data.files || {})) {

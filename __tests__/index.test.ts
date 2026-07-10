@@ -1284,7 +1284,9 @@ describe("before_agent_start: 24h auto-refresh", () => {
       on: (event: string, fn: any) => { if (event === "before_agent_start") hookFn = fn; },
       registerCommand: () => {},
       registerTool: () => {},
+      registerFlag: () => {},
       sendMessage: () => {},
+      getFlag: () => undefined,
     };
     const fire = (event = { prompt: "hello world", systemPrompt: "" }) => hookFn!(event, {});
     return { pi, fire };

@@ -50,7 +50,6 @@ import {
   isExcludedByConfig,
   extractText,
   hybridSearch,
-  embed,
   sha256,
   initSchema,
   getOcrTooling,
@@ -129,19 +128,6 @@ async function buildMinimalDocx(text: string): Promise<Buffer> {
 </w:document>`,
   );
   return await zip.generateAsync({ type: "nodebuffer" });
-}
-
-function chunkFixture(file: string, content: string, lineStart = 1) {
-  return {
-    id: `${file}-${lineStart}`,
-    file,
-    content,
-    lineStart,
-    lineEnd: lineStart + content.split("\n").length - 1,
-    hash: "abc",
-    indexed: new Date().toISOString(),
-    tokens: Math.ceil(content.length / 4),
-  };
 }
 
 // ─── Test lifecycle: close the cached DB singleton after every test ──────────

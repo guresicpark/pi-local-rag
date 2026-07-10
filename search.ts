@@ -93,12 +93,6 @@ export async function hybridSearch(
   const chunkMap = new Map<number, typeof chunks[0]>();
   for (const c of chunks) chunkMap.set(c.rowid, c);
 
-  const bm25Map = new Map<number, number>();
-  for (const r of ftsResults as any[]) bm25Map.set(r.rowid, r.bm25_score);
-
-  const distMap = new Map<number, number>();
-  for (const r of vecResults as any[]) distMap.set(r.rowid, r.distance);
-
   const bm25Scores = (ftsResults as any[]).map((r: any) => r.bm25_score);
   const hasBm25 = bm25Scores.length > 0;
   const distances = (vecResults as any[]).map((r: any) => r.distance);

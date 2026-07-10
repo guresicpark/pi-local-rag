@@ -36,7 +36,7 @@
  *   indexing.ts      — indexFiles (parallel Phase 1 read, sequential Phase 2 embed)
  *   index.ts         — extension entry point (this file) + re-exports
  */
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import type { AutocompleteItem } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { existsSync } from "node:fs";
@@ -49,7 +49,7 @@ import { loadConfig, saveConfig, normalizeExt, resolveExtensions } from "./confi
 import { getDbConn, closeDbConn, getIndexedFiles, getEmbeddedCount, saveIndex, getIndexStats } from "./db.ts";
 import { collectFiles, collectFromTracked, collectFromTrackedAsync, isExcludedByConfig } from "./chunking.ts";
 import { hybridSearch } from "./search.ts";
-import { indexFiles, isIndexStale } from "./indexing.ts";
+import { type ProgressCallbacks, indexFiles, isIndexStale } from "./indexing.ts";
 
 // Re-export the public surface so existing consumers of `pi-local-rag` keep
 // working (tests, downstream code that imports from the package root).
@@ -157,6 +157,49 @@ export default function (pi: ExtensionAPI) {
     { value: "help",     label: "help",     description: "Show all /rag commands" },
   ];
 
+  // ── Progress callback factory ──
+  function makeProgressCallbacks(
+    ctx: ExtensionCommandContext,
+    label: string,
+    doneLabel: string,
+    includeEmbed = false
+  ): ProgressCallbacks {
+    const progressBar = (n: number, total: number, width = 24): string => {
+      const filled = Math.round((n / total) * width);
+      return CYAN + "█".repeat(filled) + D + "░".repeat(width - filled) + RST;
+    };
+
+    return {
+      onFile(current, total, filename, skipped) {
+        const pct = Math.round((current / total) * 100);
+        const bar = progressBar(current, total);
+        ctx.ui.setStatus("rag", `■ ${label} ${pct}% │ ${current}/${total} │ ${skipped} unchanged`);
+        ctx.ui.setWidget("rag", [
+          `${B}${CYAN}${label}${RST}  ${bar}  ${GREEN}${pct}%${RST}`,
+          `${D}file:    ${RST}${filename}`,
+          `${D}done:    ${RST}${GREEN}${current - skipped} ${doneLabel}${RST}  ${D}${skipped} unchanged${RST}`,
+        ]);
+      },
+      onChunk(ci, total, filename) {
+        ctx.ui.setStatus("rag", `■ Embedding ${filename} — chunk ${ci}/${total}`);
+      },
+      onSave() {
+        ctx.ui.setStatus("rag", `■ Saving index...`);
+      },
+      ...(includeEmbed && {
+        onEmbed(done, total) {
+          const pct = Math.round((done / total) * 100);
+          const bar = progressBar(done, total);
+          ctx.ui.setStatus("rag", `■ Embedding ${pct}% │ ${done}/${total} chunks`);
+          ctx.ui.setWidget("rag", [
+            `${B}${CYAN}Embedding${RST}  ${bar}  ${GREEN}${pct}%${RST}`,
+            `${D}chunks:  ${RST}${done}/${total}`,
+          ]);
+        },
+      }),
+    };
+  }
+
   pi.registerCommand("rag", {
     description: "pi-local-rag: /rag index|search|find|status|rebuild [--force]|refresh|clear|exclude|on|off|ext",
     getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
@@ -187,30 +230,7 @@ export default function (pi: ExtensionAPI) {
         const total = files.length;
         ctx.ui.notify(`Found ${total} files to index`, "info");
 
-        function progressBar(n: number, total: number, width = 24): string {
-          const filled = Math.round((n / total) * width);
-          return CYAN + "█".repeat(filled) + D + "░".repeat(width - filled) + RST;
-        }
-
-        const result = await indexFiles(files, {
-          onFile(current, total, filename, skipped) {
-            const pct = Math.round((current / total) * 100);
-            const bar = progressBar(current, total);
-            ctx.ui.setStatus("rag", `■ Indexing ${pct}% │ ${current}/${total} files │ ${skipped} unchanged`);
-            ctx.ui.setWidget("rag", [
-              `${B}${CYAN}Indexing${RST}  ${bar}  ${GREEN}${pct}%${RST}`,
-              `${D}file:    ${RST}${filename}`,
-              `${D}done:    ${RST}${GREEN}${current - skipped} embedded${RST}  ${D}${skipped} unchanged${RST}`,
-            ]);
-          },
-          onChunk(ci, total, filename) {
-            ctx.ui.setStatus("rag", `■ Embedding ${filename} — chunk ${ci}/${total}`);
-          },
-          onSave() {
-            ctx.ui.setStatus("rag", `■ Saving index...`);
-          },
-        });
-
+        const result = await indexFiles(files, makeProgressCallbacks(ctx, "Indexing", "embedded"));
         ctx.ui.setStatus("rag", undefined);
         ctx.ui.setWidget("rag", undefined);
 
@@ -318,39 +338,7 @@ export default function (pi: ExtensionAPI) {
         // indexFiles starts hammering the event loop.
         await new Promise<void>(r => setTimeout(r, 0));
 
-        function progressBar(n: number, total: number, width = 24): string {
-          const filled = Math.round((n / total) * width);
-          return CYAN + "█".repeat(filled) + D + "░".repeat(width - filled) + RST;
-        }
-
-        const result = await indexFiles(targetFiles, {
-          onFile(current, total, filename, skipped) {
-            const pct = Math.round((current / total) * 100);
-            const bar = progressBar(current, total);
-            ctx.ui.setStatus("rag", `■ Rebuilding ${pct}% │ ${current}/${total} │ ${skipped} unchanged`);
-            ctx.ui.setWidget("rag", [
-              `${B}${CYAN}Rebuilding${RST}  ${bar}  ${GREEN}${pct}%${RST}`,
-              `${D}file:    ${RST}${filename}`,
-              `${D}done:    ${RST}${GREEN}${current - skipped} re-embedded${RST}  ${D}${skipped} unchanged${RST}`,
-            ]);
-          },
-          onEmbed(done, total) {
-            const pct = Math.round((done / total) * 100);
-            const bar = progressBar(done, total);
-            ctx.ui.setStatus("rag", `■ Embedding ${pct}% │ ${done}/${total} chunks`);
-            ctx.ui.setWidget("rag", [
-              `${B}${CYAN}Embedding${RST}  ${bar}  ${GREEN}${pct}%${RST}`,
-              `${D}chunks:  ${RST}${done}/${total}`,
-            ]);
-          },
-          onChunk(ci, total, filename) {
-            ctx.ui.setStatus("rag", `■ Embedding ${filename} — chunk ${ci}/${total}`);
-          },
-          onSave() {
-            ctx.ui.setStatus("rag", `■ Saving index...`);
-          },
-        }, database, force);
-
+        const result = await indexFiles(targetFiles, makeProgressCallbacks(ctx, "Rebuilding", "re-embedded", true), database, force);
         ctx.ui.setStatus("rag", undefined);
         ctx.ui.setWidget("rag", undefined);
 
@@ -374,30 +362,7 @@ export default function (pi: ExtensionAPI) {
 
         ctx.ui.notify(`Refreshing ${files.length} files...`, "info");
 
-        function progressBar(n: number, total: number, width = 24): string {
-          const filled = Math.round((n / total) * width);
-          return CYAN + "█".repeat(filled) + D + "░".repeat(width - filled) + RST;
-        }
-
-        const result = await indexFiles(files, {
-          onFile(current, total, filename, skipped) {
-            const pct = Math.round((current / total) * 100);
-            const bar = progressBar(current, total);
-            ctx.ui.setStatus("rag", `■ Refreshing ${pct}% │ ${current}/${total} │ ${skipped} unchanged`);
-            ctx.ui.setWidget("rag", [
-              `${B}${CYAN}Refreshing${RST}  ${bar}  ${GREEN}${pct}%${RST}`,
-              `${D}file:    ${RST}${filename}`,
-              `${D}done:    ${RST}${GREEN}${current - skipped} new/changed${RST}  ${D}${skipped} unchanged${RST}`,
-            ]);
-          },
-          onChunk(ci, total, filename) {
-            ctx.ui.setStatus("rag", `■ Embedding ${filename} — chunk ${ci}/${total}`);
-          },
-          onSave() {
-            ctx.ui.setStatus("rag", `■ Saving index...`);
-          },
-        });
-
+        const result = await indexFiles(files, makeProgressCallbacks(ctx, "Refreshing", "new/changed"));
         ctx.ui.setStatus("rag", undefined);
         ctx.ui.setWidget("rag", undefined);
 

@@ -1236,29 +1236,33 @@ describe("ensureDir: legacy ~/.pi/lens → ~/.pi/rag migration (global store onl
 
 // ─── isIndexStale ───────────────────────────────────────────────────────────
 
-import { isIndexStale } from "../index.ts";
+import { isIndexStale, type IndexStats } from "../index.ts";
 
 describe("isIndexStale", () => {
   const DAY_MS = 24 * 60 * 60 * 1000;
   const fresh = () => new Date(Date.now() - 60_000).toISOString();
   const stale = () => new Date(Date.now() - DAY_MS - 1_000).toISOString();
+  const makeStats = (lastBuild: string): IndexStats => ({
+    totalChunks: 0, totalFiles: 0, totalTokens: 0,
+    embeddedCount: 0, lastBuild, embeddingModel: "",
+  });
 
   it("returns false when lastBuild is empty", () => {
-    expect(isIndexStale({ chunks: [], files: {}, lastBuild: "" })).toBe(false);
+    expect(isIndexStale(makeStats(""))).toBe(false);
   });
 
   it("returns false when index was built recently", () => {
-    expect(isIndexStale({ chunks: [], files: {}, lastBuild: fresh() })).toBe(false);
+    expect(isIndexStale(makeStats(fresh()))).toBe(false);
   });
 
   it("returns true when lastBuild is more than 24 h ago", () => {
-    expect(isIndexStale({ chunks: [], files: {}, lastBuild: stale() })).toBe(true);
+    expect(isIndexStale(makeStats(stale()))).toBe(true);
   });
 
   it("respects a custom maxAgeMs", () => {
     const tenMinAgo = new Date(Date.now() - 10 * 60 * 1_000).toISOString();
-    expect(isIndexStale({ chunks: [], files: {}, lastBuild: tenMinAgo }, 5 * 60 * 1_000)).toBe(true);
-    expect(isIndexStale({ chunks: [], files: {}, lastBuild: tenMinAgo }, 15 * 60 * 1_000)).toBe(false);
+    expect(isIndexStale(makeStats(tenMinAgo), 5 * 60 * 1_000)).toBe(true);
+    expect(isIndexStale(makeStats(tenMinAgo), 15 * 60 * 1_000)).toBe(false);
   });
 });
 

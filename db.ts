@@ -2,7 +2,7 @@ import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import Database from "better-sqlite3";
 import { load as loadVec } from "sqlite-vec";
 import { getRagDir, dbFile, legacyIndexFile, ensureDir } from "./store.ts";
-import { VECTOR_DIM } from "./constants.ts";
+import * as repo from "./repository.ts";
 
 export interface Chunk {
   id: string;
@@ -13,15 +13,6 @@ export interface Chunk {
   hash: string;
   indexed: string;
   tokens: number;
-}
-
-interface FileDbEntry {
-  path: string;
-  hash: string;
-  chunks: number;
-  indexed: string;
-  size: number;
-  embedded: number;
 }
 
 interface FileEntry {
@@ -76,12 +67,11 @@ export class RagDatabase {
     db.pragma("journal_mode = WAL");
     db.pragma("foreign_keys = ON");
     loadVec(db);
-    initSchema(db);
+    repo.initSchema(db);
 
     const legacyPath = legacyIndexFile(dir);
     if (existsSync(legacyPath)) {
-      const chunkCount = db.prepare("SELECT COUNT(*) as c FROM chunks").get() as { c: number };
-      if (chunkCount.c === 0) {
+      if (repo.countChunksTotal(db) === 0) {
         migrateFromJson(db, legacyPath);
       }
     }
@@ -107,56 +97,7 @@ export const closeDbConn = () => { RagDatabase.close(); };
 export const getFreshDbConn = (dir?: string) => RagDatabase.getFreshDbConn(dir);
 
 export function initSchema(db: Database.Database) {
-  db.exec(`DROP TRIGGER IF EXISTS chunks_ai; DROP TRIGGER IF EXISTS chunks_ad;`);
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS metadata (
-      key   TEXT PRIMARY KEY,
-      value TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS chunks (
-      id          TEXT PRIMARY KEY,
-      file_path   TEXT NOT NULL,
-      chunk_content TEXT NOT NULL,
-      line_start  INTEGER NOT NULL,
-      line_end    INTEGER NOT NULL,
-      chunk_hash  TEXT NOT NULL,
-      indexed_at  TEXT NOT NULL,
-      tokens      INTEGER NOT NULL
-    );
-
-    CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-      chunk_content,
-      file_path,
-      content_rowid=rowid
-    );
-
-    CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
-      INSERT INTO chunks_fts(rowid, chunk_content, file_path)
-      VALUES (new.rowid, new.chunk_content, new.file_path);
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
-      DELETE FROM chunks_fts WHERE rowid = old.rowid;
-    END;
-
-    CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
-      embedding float[${VECTOR_DIM}]
-    );
-
-    CREATE TABLE IF NOT EXISTS files (
-      path      TEXT PRIMARY KEY,
-      hash      TEXT NOT NULL,
-      chunks    INTEGER NOT NULL,
-      indexed   TEXT NOT NULL,
-      size      INTEGER NOT NULL,
-      embedded  INTEGER NOT NULL DEFAULT 0
-    );
-
-    -- Re-indexing deletes chunks per file (DELETE … WHERE file_path = ?);
-    -- without this index each delete full-scans the chunks table.
-    CREATE INDEX IF NOT EXISTS idx_chunks_file_path ON chunks(file_path);
-  `);
+  repo.initSchema(db);
 }
 
 function migrateFromJson(db: Database.Database, jsonPath: string): void {
@@ -171,28 +112,23 @@ function migrateFromJson(db: Database.Database, jsonPath: string): void {
   }
 
   const tx = db.transaction(() => {
-    const insChunk = db.prepare(`
-      INSERT INTO chunks(id, file_path, chunk_content, line_start, line_end, chunk_hash, indexed_at, tokens)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    const insFile = db.prepare(`
-      INSERT OR REPLACE INTO files(path, hash, chunks, indexed, size, embedded)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `);
-
     for (const c of data.chunks) {
-      insChunk.run(c.id, c.file, c.content, c.lineStart, c.lineEnd, c.hash, c.indexed, c.tokens);
+      repo.insertChunk(db, {
+        id: c.id, filePath: c.file, content: c.content,
+        lineStart: c.lineStart, lineEnd: c.lineEnd,
+        hash: c.hash, indexedAt: c.indexed, tokens: c.tokens,
+      });
     }
 
     for (const [fp, info] of Object.entries(data.files || {})) {
-      insFile.run(fp, info.hash, info.chunks, info.indexed, info.size, info.embedded ? 1 : 0);
+      repo.replaceFile(db, fp, info.hash, info.chunks, info.indexed, info.size, info.embedded);
     }
 
     if (data.lastBuild) {
-      db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES ('last_build', ?)").run(data.lastBuild);
+      repo.setMetadata(db, repo.MetadataKey.LastBuild, data.lastBuild);
     }
     if (data.embeddingModel) {
-      db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES ('embedding_model', ?)").run(data.embeddingModel);
+      repo.setMetadata(db, repo.MetadataKey.EmbeddingModel, data.embeddingModel);
     }
   });
 
@@ -200,31 +136,17 @@ function migrateFromJson(db: Database.Database, jsonPath: string): void {
   try { unlinkSync(jsonPath); } catch {}
 }
 
-export function float32ToBuffer(arr: number[]): Buffer {
-  const f = new Float32Array(arr);
-  return Buffer.from(f.buffer, f.byteOffset, f.byteLength);
-}
-
 export function getIndexStats(db?: Database.Database): IndexStats {
   const dbConn = db ?? getDbConn();
-  const chunkRow = dbConn.prepare(`
-    SELECT COUNT(*) as totalChunks,
-          COALESCE(SUM(tokens), 0) as totalTokens
-    FROM chunks
-  `).get() as { totalChunks: number; totalTokens: number };
-
-  const fileRow = dbConn.prepare("SELECT COUNT(*) as totalFiles FROM files").get() as { totalFiles: number };
-  const vecRow = dbConn.prepare("SELECT COUNT(*) as embeddedCount FROM chunks_vec").get() as { embeddedCount: number };
-  const lastBuild = dbConn.prepare("SELECT value FROM metadata WHERE key = 'last_build'").get() as { value?: string } | undefined;
-  const embeddingModel = dbConn.prepare("SELECT value FROM metadata WHERE key = 'embedding_model'").get() as { value?: string } | undefined;
+  const { totalChunks, totalTokens } = repo.getChunkStats(dbConn);
 
   return {
-    totalChunks: chunkRow.totalChunks,
-    totalFiles: fileRow.totalFiles,
-    totalTokens: chunkRow.totalTokens,
-    embeddedCount: vecRow.embeddedCount,
-    lastBuild: lastBuild?.value ?? "",
-    embeddingModel: embeddingModel?.value ?? "",
+    totalChunks: totalChunks,
+    totalFiles: repo.countFiles(dbConn),
+    totalTokens: totalTokens,
+    embeddedCount: repo.getEmbeddedCount(dbConn),
+    lastBuild: repo.getMetadata(dbConn, repo.MetadataKey.LastBuild) ?? "",
+    embeddingModel: repo.getMetadata(dbConn, repo.MetadataKey.EmbeddingModel) ?? "",
   };
 }
 
@@ -235,36 +157,26 @@ export function saveIndex(_index: IndexMeta) { /* writes are transactional in in
 
 export function loadIndex(): IndexMeta {
   const db = getDbConn();
-  const chunks = db.prepare(`
-    SELECT c.id, c.file_path as file, c.chunk_content as content,
-            c.line_start as lineStart, c.line_end as lineEnd,
-            c.chunk_hash as hash, c.indexed_at as indexed, c.tokens
-    FROM chunks c
-  `).all() as Chunk[];
+  const chunks = repo.getAllChunks(db) as Chunk[];
 
-  const filesRaw = db.prepare("SELECT * FROM files").all() as Array<FileDbEntry>;
+  const filesRaw = repo.listFiles(db);
   const files: IndexMeta["files"] = {};
   for (const f of filesRaw) {
-    files[f.path] = {hash: f.hash, chunks: f.chunks, indexed: f.indexed, size: f.size, embedded: !!f.embedded};
+    files[f.path] = { hash: f.hash, chunks: f.chunks, indexed: f.indexed, size: f.size, embedded: !!f.embedded };
   }
-
-  const lastBuild = db.prepare("SELECT value FROM metadata WHERE key = 'last_build'").get() as { value?: string } | undefined;
-  const embeddingModel = db.prepare("SELECT value FROM metadata WHERE key = 'embedding_model'").get() as { value?: string } | undefined;
 
   return {
     chunks, files,
-    lastBuild: lastBuild?.value ?? "",
-    embeddingModel: embeddingModel?.value,
+    lastBuild: repo.getMetadata(db, repo.MetadataKey.LastBuild) ?? "",
+    embeddingModel: repo.getMetadata(db, repo.MetadataKey.EmbeddingModel),
   };
 }
 
 export function getEmbeddedCount(): number {
   const db = getDbConn();
-  const vecRow = db.prepare("SELECT COUNT(*) as embeddedCount FROM chunks_vec").get() as { embeddedCount: number };
-  return vecRow.embeddedCount;
+  return repo.getEmbeddedCount(db);
 }
 
-export function getIndexedFiles(): FileDbEntry[] {
-  const db = getDbConn();
-  return (db.prepare("SELECT * FROM files").all() as Array<FileDbEntry>);
+export function getIndexedFiles(): repo.FileRow[] {
+  return repo.listFiles(getDbConn());
 }

@@ -58,7 +58,7 @@ export { getRagDir, GLOBAL_RAG_DIR, LEGACY_DIR } from "./store.ts";
 export type { RagConfig } from "./config.ts";
 export { loadConfig, saveConfig, defaultConfig, normalizeExt, resolveExtensions } from "./config.ts";
 export type { Chunk, IndexMeta, IndexStats } from "./db.ts";
-export { getFreshDbConn, getDbConn, closeDbConn, loadIndex, saveIndex, getIndexStats, initSchema, float32ToBuffer } from "./db.ts";
+export { getFreshDbConn, getDbConn, closeDbConn, loadIndex, saveIndex, getIndexStats, initSchema } from "./db.ts";
 export {
   sha256, chunkText, collectFiles, collectFilesAsync, collectFromTracked, collectFromTrackedAsync,
   isExcludedByConfig, extractText, getOcrTooling, isSparsePdfText,
@@ -68,6 +68,7 @@ export type { ScoredChunk } from "./search.ts";
 export { cosineSimilarity, normalize, hybridSearch } from "./search.ts";
 export { isIndexStale, indexFiles } from "./indexing.ts";
 export type { ProgressCallbacks } from "./indexing.ts";
+import * as repo from "./repository.ts";
 
 // ─── Extension ────────────────────────────────────────────────────────────────
 
@@ -287,8 +288,7 @@ export default function (pi: ExtensionAPI) {
 
         const database = getDbConn();
         const config = loadConfig();
-        const indexedRows = database.prepare("SELECT path FROM files").all() as Array<{ path: string }>;
-        const indexedFileSet = new Set(indexedRows.map(f => f.path));
+        const indexedFileSet = new Set(repo.listFilePaths(database));
 
         // Walking tracked paths can stall the event loop on large trees
         // (45k+ files). Use the async variant + yield up-front so the user
@@ -313,19 +313,18 @@ export default function (pi: ExtensionAPI) {
         // Files in the index but no longer present (deleted, excluded, or untracked).
         const droppedFiles = [...indexedFileSet].filter(f => !targetSet.has(f));
         for (const f of droppedFiles) {
-          database.prepare("DELETE FROM chunks_vec WHERE rowid IN (SELECT rowid FROM chunks WHERE file_path = ?)").run(f);
-          database.prepare("DELETE FROM chunks WHERE file_path = ?").run(f);
-          database.prepare("DELETE FROM files WHERE path = ?").run(f);
+          repo.deleteVectorsForFile(database, f);
+          repo.deleteChunksForFile(database, f);
+          repo.deleteFile(database, f);
         }
         if (force) {
           // --force: wipe everything and rebuild the FTS index. indexFiles
           // will then insert fresh rows for every targetFile, bypassing the
           // skip-on-equal-hash check.
-          database.exec("DELETE FROM chunks_vec; DELETE FROM chunks; DELETE FROM files;");
-          database.exec("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')");
+          repo.clearAllVectors(database);
         } else {
           for (const f of targetFiles) {
-            database.prepare("UPDATE files SET embedded = 0 WHERE path = ?").run(f);
+            repo.setFileEmbedded(database, f, false);
           }
         }
 

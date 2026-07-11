@@ -1,9 +1,10 @@
 import { basename } from "node:path";
 import Database from "better-sqlite3";
-import { getDbConn, float32ToBuffer, type IndexStats } from "./db.ts";
+import { getDbConn, type IndexStats } from "./db.ts";
 import { EMBEDDING_MODEL } from "./constants.ts";
 import { embedBatch } from "./embed.ts";
 import { chunkText, extractText, sha256 } from "./chunking.ts";
+import * as repo from "./repository.ts";
 
 export interface ProgressCallbacks {
   onFile?: (current: number, total: number, filename: string, skipped: number) => void;
@@ -55,10 +56,6 @@ export async function indexFiles(
       return { indexed: 0, chunks: 0, skipped: 0, durationMs: Date.now() - startMs };
     }
 
-    const getFileStmt = database.prepare("SELECT hash, embedded FROM files WHERE path = ?");
-    const delChunks = database.prepare("DELETE FROM chunks WHERE file_path = ?");
-    const delVec = database.prepare("DELETE FROM chunks_vec WHERE rowid IN (SELECT rowid FROM chunks WHERE file_path = ?)");
-
     // Phase 1: parallel read + chunk; DB ops on main thread
     const CONCURRENCY = 32;
     const YIELD_INTERVAL = 64;
@@ -105,15 +102,15 @@ export async function indexFiles(
         processedCount++;
         const name = basename(r.fp);
 
-        const existing = getFileStmt.get(r.fp) as { hash?: string; embedded?: number } | undefined;
+        const existing = repo.getFile(database, r.fp);
         if (!force && existing?.hash === r.hash && existing?.embedded) {
           skipped++;
           progress?.onFile?.(processedCount, total, name, skipped);
           continue;
         }
 
-        delVec.run(r.fp);
-        delChunks.run(r.fp);
+        repo.deleteVectorsForFile(database, r.fp);
+        repo.deleteChunksForFile(database, r.fp);
 
         const rawChunks = r.raw.map(c => ({ ...c, hash: sha256(c.content) }));
         stderrProgress(`[${processedCount}/${total}] chunked ${name} (${rawChunks.length} chunks)`);
@@ -172,19 +169,6 @@ export async function indexFiles(
     await flushGroup();
 
     // Phase 3: insert chunks + vectors into DB
-    const insChunk = database.prepare(`
-      INSERT INTO chunks(id, file_path, chunk_content, line_start, line_end, chunk_hash, indexed_at, tokens)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    const insVecRowid = database.prepare("INSERT INTO chunks_vec(rowid, embedding) VALUES (CAST(? AS INTEGER), ?)");
-    const upsertFile = database.prepare(`
-      INSERT INTO files(path, hash, chunks, indexed, size, embedded)
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(path) DO UPDATE SET
-        hash=excluded.hash, chunks=excluded.chunks, indexed=excluded.indexed,
-        size=excluded.size, embedded=excluded.embedded
-    `);
-
     let chunked = 0;
     const indexedAt = new Date().toISOString();
     const tx = database.transaction(() => {
@@ -192,18 +176,18 @@ export async function indexFiles(
         const vectors = fw._vectors;
         for (let j = 0; j < fw.rawChunks.length; j++) {
           const c = fw.rawChunks[j];
-          const chunkResult = insChunk.run(
-            `${sha256(fw.fp)}-${c.lineStart}`,
-            fw.fp, c.content, c.lineStart, c.lineEnd, c.hash,
-            indexedAt,
-            Math.ceil(c.content.length / 4),
-          );
+          const chunkResult = repo.insertChunk(database, {
+            id: `${sha256(fw.fp)}-${c.lineStart}`,
+            filePath: fw.fp, content: c.content,
+            lineStart: c.lineStart, lineEnd: c.lineEnd, hash: c.hash,
+            indexedAt, tokens: Math.ceil(c.content.length / 4),
+          });          
           if (vectors?.[j]) {
-            insVecRowid.run(Number(chunkResult.lastInsertRowid), float32ToBuffer(vectors[j]));
+            repo.insertVector(database, Number(chunkResult.lastInsertRowid), vectors[j]);
           }
           chunked++;
         }
-        upsertFile.run(fw.fp, fw.hash, fw.rawChunks.length, indexedAt, fw.size, 1);
+        repo.upsertFile(database, fw.fp, fw.hash, fw.rawChunks.length, indexedAt, fw.size, true);
       }
     });
 
@@ -211,8 +195,8 @@ export async function indexFiles(
 
     if (!hadCallbacks) process.stderr.write(`\r\x1b[2K`);
     progress?.onSave?.();
-    database.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES ('last_build', ?)").run(new Date().toISOString());
-    database.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES ('embedding_model', ?)").run(EMBEDDING_MODEL);
+    repo.setMetadata(database, repo.MetadataKey.LastBuild, new Date().toISOString());
+    repo.setMetadata(database, repo.MetadataKey.EmbeddingModel, EMBEDDING_MODEL);
 
     return { indexed: toIndex.length, chunks: chunked, skipped, durationMs: Date.now() - startMs };
   } finally {

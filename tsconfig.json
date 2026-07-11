@@ -10,5 +10,5 @@
     "noUnusedLocals": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["*.ts", "types/**/*.d.ts"]
+  "include": ["./**/*.ts", "types/**/*.d.ts"]
 }

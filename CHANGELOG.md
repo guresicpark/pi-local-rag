@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Chunk-size caps (indexing freeze fix)**: `chunkText` previously capped line *count* (50) but not length — one minified/CSV/base64 line could become a ~500 KB chunk, tokenized to the tokenizer's 8192-token ceiling, and the whole 64-text ONNX batch padded to it (`[batch, heads, seq, seq]` attention → tens of GB → indexing appears stuck, e.g. at "chunks: 384/3793"). Lines are now hard-split at `MAX_LINE_CHARS` (1000, segments keep their source line number) and chunks capped at `MAX_CHUNK_CHARS` (4000 ≈ 1k tokens). Embedding groups are also sorted by content length so batches pad to similar-size texts instead of one monster inflating its neighbors. Re-index with `/rag rebuild --force` to re-chunk existing stores.
 - **Embedding model swap**: `Xenova/all-MiniLM-L6-v2` (384-dim, ~23 MB) → `nomic-ai/nomic-embed-text-v1.5` (768-dim, q8-quantized ONNX, ~111 MB download). Queries and documents are prefixed with the nomic `search_query:` / `search_document:` task instructions as required by the model card. Existing stores are auto-migrated on first open: the stale `chunks_vec` table and indexed content are dropped (tracked paths survive in `config.json`) — run `/rag rebuild` to re-index.
 
 ## 0.4.1

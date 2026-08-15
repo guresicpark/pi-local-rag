@@ -33,6 +33,14 @@ export const BINARY_DOC_EXTS = new Set([".pdf", ".docx"]);
 export const TEXT_MAX_BYTES = 500_000;
 export const BINARY_DOC_MAX_BYTES = 10_000_000;
 
+// Chunk-size caps. chunkText() limits line COUNT, not length — a single
+// minified/CSV/base64 line up to TEXT_MAX_BYTES becomes one giant chunk that
+// gets tokenized to the tokenizer's 8192-token ceiling, and the whole ONNX
+// batch is padded to it ([batch, heads, seq, seq] attention → tens of GB).
+// Capping keeps a batch at ~1k tokens padded worst case.
+export const MAX_LINE_CHARS = 1000;
+export const MAX_CHUNK_CHARS = 4000;
+
 export const SKIP_DIRS = new Set([
   "node_modules", ".git", ".next", "dist", "build", "__pycache__", ".venv", "venv", ".cache",
 ]);

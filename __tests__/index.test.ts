@@ -41,6 +41,8 @@ const SAMPLE_IMAGE_PDF = readFileSync(join(__dirname, "fixtures", "sample-image.
 // Imports that don't depend on env-time state can be static.
 import {
   chunkText,
+  MAX_LINE_CHARS,
+  MAX_CHUNK_CHARS,
   cosineSimilarity,
   normalize,
   DEFAULT_TEXT_EXTS,
@@ -175,6 +177,35 @@ describe("chunkText", () => {
     const lines = Array.from({ length: 200 }, (_, i) => `data ${i}`);
     const chunks = chunkText(lines.join("\n"), 50);
     expect(chunks[chunks.length - 1].lineEnd).toBe(200);
+  });
+
+  it("hard-splits a single pathological line into capped chunks without losing text", () => {
+    const long = "z".repeat(MAX_LINE_CHARS * 5);
+    const text = `top\n${long}\nbottom`;
+    const chunks = chunkText(text);
+    expect(chunks.length).toBeGreaterThanOrEqual(2);
+    for (const c of chunks) expect(c.content.length).toBeLessThanOrEqual(MAX_CHUNK_CHARS);
+    // No text lost: joining chunks (ignoring the newlines the splitter
+    // injects between segments of the same source line) reproduces the input.
+    const joined = chunks.map(c => c.content).join("\n");
+    expect(joined.replace(/\n/g, "")).toBe(text.replace(/\n/g, ""));
+    expect(joined.split("\n").length).toBeGreaterThanOrEqual(7); // top + 5 segments + bottom
+    // Pieces of the long line report the same source line number
+    for (const c of chunks) {
+      if (!c.content.includes("top") && !c.content.includes("bottom")) {
+        expect(c.lineStart).toBe(2);
+        expect(c.lineEnd).toBe(2);
+      }
+    }
+  });
+
+  it("caps total chunk chars when lines are individually short", () => {
+    const lines = Array.from({ length: 60 }, () => "y".repeat(200));
+    const text = lines.join("\n");
+    const chunks = chunkText(text);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const c of chunks) expect(c.content.length).toBeLessThanOrEqual(MAX_CHUNK_CHARS);
+    expect(chunks.map(c => c.content).join("\n")).toBe(text);
   });
 });
 

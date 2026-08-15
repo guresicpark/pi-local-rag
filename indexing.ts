@@ -139,42 +139,42 @@ export async function indexFiles(
 
     // Phase 2: embed in cross-file groups
     const EMBED_GROUP_TARGET = 256;
-    const groupChunks: { fw: FileWork; ci: number }[] = [];
-    let globalChunkIdx = 0;
     const totalChunks = toIndex.reduce((s, f) => s + f.rawChunks.length, 0);
+    const pairs: { fw: FileWork; ci: number }[] = [];
+    for (const fw of toIndex) {
+      for (let j = 0; j < fw.rawChunks.length; j++) pairs.push({ fw, ci: j });
+    }
+    // Sort by content length so each group embeds similar-length texts
+    // together — ONNX pads every text in a batch to the longest, so an
+    // unsored mix inflates the attention matrix for all its neighbors.
+    // Vectors are written back by position, so embed order is free.
+    pairs.sort((a, b) => a.fw.rawChunks[a.ci].content.length - b.fw.rawChunks[b.ci].content.length);
 
-    const flushGroup = async () => {
-      if (groupChunks.length === 0) return;
-      const texts = groupChunks.map(g => g.fw.rawChunks[g.ci].content);
+    const flushGroup = async (group: { fw: FileWork; ci: number }[], startIdx: number) => {
+      if (group.length === 0) return;
+      const texts = group.map(g => g.fw.rawChunks[g.ci].content);
       // Fire before the batch too, so the TUI flips to the "Embedding" widget
       // (covering first-run model download) instead of the stale 100% screen.
-      progress?.onEmbed?.(globalChunkIdx - groupChunks.length, totalChunks);
-      stderrProgress(`Embedding ${globalChunkIdx - groupChunks.length + 1}…${globalChunkIdx}/${totalChunks} chunks`);
+      progress?.onEmbed?.(startIdx, totalChunks);
+      stderrProgress(`Embedding ${startIdx + 1}…${startIdx + group.length}/${totalChunks} chunks`);
       // Forward embedBatch's per-batch (BATCH_SIZE) progress so the TUI
       // updates every 64 chunks instead of once per 256-chunk group.
-      const groupStart = globalChunkIdx - groupChunks.length;
       const vectors = await embedBatch(texts, done => {
-        progress?.onEmbed?.(groupStart + done, totalChunks);
+        progress?.onEmbed?.(startIdx + done, totalChunks);
       });
-      for (let vi = 0; vi < groupChunks.length; vi++) {
-        const g = groupChunks[vi];
+      for (let vi = 0; vi < group.length; vi++) {
+        const g = group[vi];
         g.fw._vectors ??= new Array(g.fw.rawChunks.length);
         g.fw._vectors[g.ci] = vectors[vi];
       }
-      progress?.onEmbed?.(globalChunkIdx, totalChunks);
-      groupChunks.length = 0;
+      progress?.onEmbed?.(startIdx + group.length, totalChunks);
       // Yield so the TUI can render the progress update before the next batch.
       await yield_();
     };
 
-    for (const fw of toIndex) {
-      for (let j = 0; j < fw.rawChunks.length; j++) {
-        groupChunks.push({ fw, ci: j });
-        globalChunkIdx++;
-        if (groupChunks.length >= EMBED_GROUP_TARGET) await flushGroup();
-      }
+    for (let p = 0; p < pairs.length; p += EMBED_GROUP_TARGET) {
+      await flushGroup(pairs.slice(p, p + EMBED_GROUP_TARGET), p);
     }
-    await flushGroup();
 
     // Phase 3: insert chunks + vectors into DB
     let chunked = 0;

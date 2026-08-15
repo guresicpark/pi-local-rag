@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import ignore from "ignore";
-import { BINARY_DOC_EXTS, TEXT_MAX_BYTES, BINARY_DOC_MAX_BYTES, SKIP_DIRS } from "./constants.ts";
+import { BINARY_DOC_EXTS, TEXT_MAX_BYTES, BINARY_DOC_MAX_BYTES, MAX_LINE_CHARS, MAX_CHUNK_CHARS, SKIP_DIRS } from "./constants.ts";
 import { loadConfig, resolveExtensions, type RagConfig } from "./config.ts";
 
 const yield_ = () => new Promise<void>(r => setTimeout(r, 0));
@@ -18,15 +18,35 @@ export function sha256(data: string): string {
 export function chunkText(text: string, maxLines = 50): { content: string; lineStart: number; lineEnd: number }[] {
   const lines = text.split("\n");
   const chunks: { content: string; lineStart: number; lineEnd: number }[] = [];
-  let i = 0;
-  while (i < lines.length) {
-    let end = Math.min(i + maxLines, lines.length);
-    for (let j = end - 1; j > i + 10 && j > end - 15; j--) {
-      if (lines[j]?.trim() === "") { end = j + 1; break; }
+
+  // Split pathologically long lines (minified JS/JSON, CSV rows, base64
+  // blobs) into MAX_LINE_CHARS segments. Segments of one source line share
+  // that line's number so references stay accurate.
+  const rows: { text: string; line: number }[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.length <= MAX_LINE_CHARS) { rows.push({ text: line, line: i + 1 }); continue; }
+    for (let s = 0; s < line.length; s += MAX_LINE_CHARS) {
+      rows.push({ text: line.slice(s, s + MAX_LINE_CHARS), line: i + 1 });
     }
-    const chunk = lines.slice(i, end).join("\n");
+  }
+
+  let i = 0;
+  while (i < rows.length) {
+    let end = Math.min(i + maxLines, rows.length);
+    for (let j = end - 1; j > i + 10 && j > end - 15; j--) {
+      if (rows[j]?.text.trim() === "") { end = j + 1; break; }
+    }
+    // Shrink the window further if the joined content would exceed
+    // MAX_CHUNK_CHARS (≈1k tokens — the embedding model's sweet spot).
+    let len = rows[i].text.length;
+    for (let j = i + 1; j < end; j++) {
+      len += 1 + rows[j].text.length;
+      if (len > MAX_CHUNK_CHARS) { end = j; break; }
+    }
+    const chunk = rows.slice(i, end).map(r => r.text).join("\n");
     if (chunk.trim().length > 20) {
-      chunks.push({ content: chunk, lineStart: i + 1, lineEnd: end });
+      chunks.push({ content: chunk, lineStart: rows[i].line, lineEnd: rows[end - 1].line });
     }
     i = end;
   }

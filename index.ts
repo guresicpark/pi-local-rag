@@ -46,7 +46,7 @@ import ignore from "ignore";
 import { RST, B, D, GREEN, CYAN } from "./constants.ts";
 import { getRagDir, GLOBAL_RAG_DIR } from "./store.ts";
 import { loadConfig, saveConfig, normalizeExt, resolveExtensions } from "./config.ts";
-import { getDbConn, loadIndex, clearIndex, getIndexStats } from "./db.ts";
+import { getDbConn, closeDbConn, loadIndex, clearIndex, getIndexStats } from "./db.ts";
 import { collectFiles, collectFromTracked, collectFromTrackedAsync, isExcludedByConfig } from "./chunking.ts";
 import { hybridSearch } from "./search.ts";
 import { indexFiles, isIndexStale } from "./indexing.ts";
@@ -131,7 +131,11 @@ export default function (pi: ExtensionAPI) {
         },
       };
     } finally {
-      database.close();
+      // Must go through closeDbConn() (nulls the singleton) — calling
+      // database.close() directly leaves RagDatabase._instance pointing
+      // at a dead connection and the next turn gets
+      // "The database connection is not open".
+      closeDbConn();
     }
   });
 

@@ -274,6 +274,10 @@ export function setMetadata(db: Database.Database, key: MetadataKey, value: stri
   db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)").run(key, value);
 }
 
+export function deleteMetadata(db: Database.Database, key: MetadataKey) {
+  db.prepare("DELETE FROM metadata WHERE key = ?").run(key);
+}
+
 export function getChunkStats(db: Database.Database): { totalChunks: number; totalTokens: number } {
   return db.prepare(`
     SELECT COUNT(*) as totalChunks, COALESCE(SUM(tokens), 0) as totalTokens

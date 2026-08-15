@@ -162,6 +162,15 @@ export function getIndexStats(db?: Database.Database): IndexStats {
  *  save step. Kept on the public surface to avoid breaking external imports. */
 export function saveIndex(_index: IndexMeta) { /* writes are transactional in indexFiles */ }
 
+/** Wipe all indexed data: chunks, vectors, FTS rows, file entries, and the
+ *  last-build timestamp. Embedding-model metadata is kept (it reflects the
+ *  configured model, not indexed content). */
+export function clearIndex(db?: Database.Database) {
+  const dbConn = db ?? getDbConn();
+  repo.clearAllVectors(dbConn);
+  repo.deleteMetadata(dbConn, repo.MetadataKey.LastBuild);
+}
+
 export function loadIndex(): IndexMeta {
   const db = getDbConn();
   const chunks = repo.getAllChunks(db) as Chunk[];

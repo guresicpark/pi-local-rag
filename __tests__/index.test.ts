@@ -1055,6 +1055,49 @@ describe("Storage (loadConfig/saveConfig/loadIndex/saveIndex/ensureDir)", () => 
     // back-compat with callers that still call it.
     expect(() => saveIndex({ chunks: [], files: {}, lastBuild: "" })).not.toThrow();
   });
+
+  it("clearIndex wipes chunks, vectors, files, FTS and last_build (what /rag clear calls)", async () => {
+    const mod = await import("../index.ts");
+    const db = mod.getFreshDbConn();
+    try {
+      const r = db.prepare(`
+        INSERT INTO chunks(id, file_path, chunk_content, line_start, line_end, chunk_hash, indexed_at, tokens)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run("clear-1", "/some/clear.ts", "hello world", 1, 2, "cafebabe", "2026-05-15T00:00:00Z", 3);
+      const vec = new Float32Array(384).fill(0.2);
+      db.prepare("INSERT INTO chunks_vec(rowid, embedding) VALUES (CAST(? AS INTEGER), ?)").run(
+        Number(r.lastInsertRowid),
+        Buffer.from(vec.buffer, vec.byteOffset, vec.byteLength),
+      );
+      db.prepare(`
+        INSERT OR REPLACE INTO files(path, hash, chunks, indexed, size, embedded)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run("/some/clear.ts", "cafebabe", 1, "2026-05-15T00:00:00Z", 11, 1);
+      db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES ('last_build', ?)").run("2026-05-15T00:00:00Z");
+      db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES ('embedding_model', ?)").run("Xenova/all-MiniLM-L6-v2");
+    } finally {
+      db.close();
+    }
+
+    mod.clearIndex();
+
+    const stats = mod.getIndexStats(mod.getDbConn());
+    expect(stats.totalFiles).toBe(0);
+    expect(stats.totalChunks).toBe(0);
+    expect(stats.totalTokens).toBe(0);
+    expect(stats.embeddedCount).toBe(0);
+    expect(stats.lastBuild).toBe("");
+    // Embedding-model metadata survives a clear — it describes the configured
+    // model, not indexed content.
+    expect(stats.embeddingModel).toBe("Xenova/all-MiniLM-L6-v2");
+
+    const idx = mod.loadIndex();
+    expect(idx.chunks).toEqual([]);
+    expect(idx.files).toEqual({});
+
+    const singleton = mod.getDbConn();
+    expect((singleton.prepare("SELECT COUNT(*) AS n FROM chunks_fts").get() as { n: number }).n).toBe(0);
+  });
 });
 
 // ─── getRagDir: walk-up resolution + project vs global store ────────────────

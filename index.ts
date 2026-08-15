@@ -46,7 +46,7 @@ import ignore from "ignore";
 import { RST, B, D, GREEN, CYAN } from "./constants.ts";
 import { getRagDir, GLOBAL_RAG_DIR } from "./store.ts";
 import { loadConfig, saveConfig, normalizeExt, resolveExtensions } from "./config.ts";
-import { getDbConn, loadIndex, saveIndex, getIndexStats } from "./db.ts";
+import { getDbConn, loadIndex, clearIndex, getIndexStats } from "./db.ts";
 import { collectFiles, collectFromTracked, collectFromTrackedAsync, isExcludedByConfig } from "./chunking.ts";
 import { hybridSearch } from "./search.ts";
 import { indexFiles, isIndexStale } from "./indexing.ts";
@@ -58,7 +58,7 @@ export { getRagDir, GLOBAL_RAG_DIR, LEGACY_DIR } from "./store.ts";
 export type { RagConfig } from "./config.ts";
 export { loadConfig, saveConfig, defaultConfig, normalizeExt, resolveExtensions } from "./config.ts";
 export type { Chunk, IndexMeta, IndexStats } from "./db.ts";
-export { openDb, getDb, getDbConn, closeDbConn, getFreshDbConn, loadIndex, saveIndex, getIndexStats, initSchema, float32ToBuffer } from "./db.ts";
+export { openDb, getDb, getDbConn, closeDbConn, getFreshDbConn, loadIndex, saveIndex, clearIndex, getIndexStats, initSchema, float32ToBuffer } from "./db.ts";
 export {
   sha256, chunkText, collectFiles, collectFilesAsync, collectFromTracked, collectFromTrackedAsync,
   isExcludedByConfig, extractText, getOcrTooling, isSparsePdfText,
@@ -463,7 +463,7 @@ export default function (pi: ExtensionAPI) {
 
       // ── clear ──
       if (cmd === "clear") {
-        saveIndex({ chunks: [], files: {}, lastBuild: "" });
+        clearIndex();
         ctx.ui.notify("Index cleared.", "info");
         return;
       }

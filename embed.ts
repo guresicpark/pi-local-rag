@@ -1,10 +1,31 @@
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { EMBEDDING_MODEL, QUERY_PREFIX, DOC_PREFIX } from "./constants.ts";
 
 let _pipeline: any = null;
 
+/**
+ * Persistent HuggingFace model cache directory.
+ *
+ * Transformers.js in Node defaults `env.cacheDir` to `./.cache` relative to
+ * the process cwd — the ~111 MB nomic download would be repeated for every
+ * project the agent runs in. Pin it to one shared location, honoring the
+ * standard HF env vars with a pi-local-rag-specific override.
+ *
+ * Priority: PI_RAG_MODEL_CACHE > TRANSFORMERS_CACHE > HF_HOME/transformers >
+ * ~/.cache/huggingface/transformers.
+ */
+export function resolveModelCacheDir(): string {
+  if (process.env.PI_RAG_MODEL_CACHE) return process.env.PI_RAG_MODEL_CACHE;
+  if (process.env.TRANSFORMERS_CACHE) return process.env.TRANSFORMERS_CACHE;
+  if (process.env.HF_HOME) return join(process.env.HF_HOME, "transformers");
+  return join(homedir(), ".cache", "huggingface", "transformers");
+}
+
 async function getEmbedder() {
   if (_pipeline) return _pipeline;
-  const { pipeline } = await import("@huggingface/transformers");
+  const { pipeline, env } = await import("@huggingface/transformers");
+  env.cacheDir = resolveModelCacheDir();
   // q8 = quantized ONNX weights (~111 MB vs ~547 MB fp32) — keeps the
   // first-run download reasonable with negligible quality loss.
   _pipeline = await pipeline("feature-extraction", EMBEDDING_MODEL, { dtype: "q8" });

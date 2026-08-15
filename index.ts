@@ -63,7 +63,7 @@ export {
   sha256, chunkText, collectFiles, collectFilesAsync, collectFromTracked, collectFromTrackedAsync,
   isExcludedByConfig, extractText, getOcrTooling, isSparsePdfText,
 } from "./chunking.ts";
-export { embed, embedBatch } from "./embed.ts";
+export { embed, embedBatch, resolveModelCacheDir } from "./embed.ts";
 export type { ScoredChunk } from "./search.ts";
 export { cosineSimilarity, normalize, hybridSearch } from "./search.ts";
 export { isIndexStale, indexFiles } from "./indexing.ts";

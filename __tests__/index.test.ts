@@ -9,7 +9,7 @@ import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } 
 import {
   mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, realpathSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join, dirname, relative, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import ignore from "ignore";
@@ -20,6 +20,7 @@ import { load as loadVec } from "sqlite-vec";
 // model. The mocked pipeline handles both single-string and batched-array
 // inputs (commit 849e485 fix).
 vi.mock("@huggingface/transformers", () => ({
+  env: { cacheDir: "" },
   pipeline: vi.fn().mockResolvedValue(
     vi.fn().mockImplementation(async (texts: string | string[]) => {
       // Mirror the real Transformers.js batch API: always return a single
@@ -1184,6 +1185,54 @@ describe("getRagDir (per-project store resolution)", () => {
     } finally {
       rmSync(fresh, { recursive: true, force: true });
     }
+  });
+});
+
+// ─── resolveModelCacheDir ────────────────────────────────────────────────────
+//
+// Transformers.js defaults its Node cache to `./.cache` (cwd-relative), which
+// re-downloads the ~111 MB model per project. resolveModelCacheDir pins it to
+// a shared dir, honoring standard HF env vars.
+
+describe("resolveModelCacheDir", () => {
+  const KEYS = ["PI_RAG_MODEL_CACHE", "TRANSFORMERS_CACHE", "HF_HOME"] as const;
+  const saved: Record<string, string | undefined> = {};
+  let resolveModelCacheDir: typeof import("../index.ts").resolveModelCacheDir;
+
+  beforeAll(async () => {
+    ({ resolveModelCacheDir } = await import("../index.ts"));
+  });
+
+  beforeEach(() => {
+    for (const k of KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
+  });
+
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (saved[k] !== undefined) process.env[k] = saved[k];
+      else delete process.env[k];
+    }
+  });
+
+  it("defaults to ~/.cache/huggingface/transformers", () => {
+    expect(resolveModelCacheDir()).toBe(join(homedir(), ".cache", "huggingface", "transformers"));
+  });
+
+  it("honors TRANSFORMERS_CACHE", () => {
+    process.env.TRANSFORMERS_CACHE = "/custom/tf-cache";
+    expect(resolveModelCacheDir()).toBe("/custom/tf-cache");
+  });
+
+  it("honors HF_HOME by appending /transformers", () => {
+    process.env.HF_HOME = "/custom/hf-home";
+    expect(resolveModelCacheDir()).toBe(join("/custom/hf-home", "transformers"));
+  });
+
+  it("PI_RAG_MODEL_CACHE wins over the standard HF vars", () => {
+    process.env.PI_RAG_MODEL_CACHE = "/pi/rag/models";
+    process.env.TRANSFORMERS_CACHE = "/custom/tf-cache";
+    process.env.HF_HOME = "/custom/hf-home";
+    expect(resolveModelCacheDir()).toBe("/pi/rag/models");
   });
 });
 

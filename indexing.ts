@@ -150,7 +150,12 @@ export async function indexFiles(
       // (covering first-run model download) instead of the stale 100% screen.
       progress?.onEmbed?.(globalChunkIdx - groupChunks.length, totalChunks);
       stderrProgress(`Embedding ${globalChunkIdx - groupChunks.length + 1}…${globalChunkIdx}/${totalChunks} chunks`);
-      const vectors = await embedBatch(texts);
+      // Forward embedBatch's per-batch (BATCH_SIZE) progress so the TUI
+      // updates every 64 chunks instead of once per 256-chunk group.
+      const groupStart = globalChunkIdx - groupChunks.length;
+      const vectors = await embedBatch(texts, done => {
+        progress?.onEmbed?.(groupStart + done, totalChunks);
+      });
       for (let vi = 0; vi < groupChunks.length; vi++) {
         const g = groupChunks[vi];
         g.fw._vectors ??= new Array(g.fw.rawChunks.length);

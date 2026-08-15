@@ -16,17 +16,17 @@ import ignore from "ignore";
 import Database from "better-sqlite3";
 import { load as loadVec } from "sqlite-vec";
 
-// Mock @huggingface/transformers so search/embed tests don't load the ~23 MB ONNX
+// Mock @huggingface/transformers so search/embed tests don't load the ONNX
 // model. The mocked pipeline handles both single-string and batched-array
 // inputs (commit 849e485 fix).
 vi.mock("@huggingface/transformers", () => ({
   pipeline: vi.fn().mockResolvedValue(
     vi.fn().mockImplementation(async (texts: string | string[]) => {
-      // Mirror the real Xenova/transformers batch API: always return a single
+      // Mirror the real Transformers.js batch API: always return a single
       // Tensor-like object whose `data` is a flat Float32Array of
       // [batchSize × dim].  Single-string input is treated as batchSize=1.
       const batch = Array.isArray(texts) ? texts : [texts];
-      const DIM = 384;
+      const DIM = 768;
       const flat = new Float32Array(batch.length * DIM).fill(0.1);
       return { data: flat };
     })
@@ -831,7 +831,7 @@ describe("hybridSearch (BM25 via FTS5, no vectors)", () => {
 });
 
 describe("hybridSearch with vectors", () => {
-  const vec = (seed: number) => Array.from({ length: 384 }, (_, i) => (i === seed ? 1 : 0));
+  const vec = (seed: number) => Array.from({ length: 768 }, (_, i) => (i === seed ? 1 : 0));
 
   it("uses vector scores when chunks have embeddings", async () => {
     const db = createTestDb([
@@ -1022,7 +1022,7 @@ describe("Storage (loadConfig/saveConfig/loadIndex/saveIndex/ensureDir)", () => 
         INSERT INTO chunks(id, file_path, chunk_content, line_start, line_end, chunk_hash, indexed_at, tokens)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run("abc-1", "/some/file.ts", "export const x = 1;", 1, 1, "deadbeef", "2026-05-15T00:00:00Z", 6);
-      const vec = new Float32Array(384).fill(0.1);
+      const vec = new Float32Array(768).fill(0.1);
       db.prepare("INSERT INTO chunks_vec(rowid, embedding) VALUES (CAST(? AS INTEGER), ?)").run(
         Number(r.lastInsertRowid),
         Buffer.from(vec.buffer, vec.byteOffset, vec.byteLength),
@@ -1032,14 +1032,14 @@ describe("Storage (loadConfig/saveConfig/loadIndex/saveIndex/ensureDir)", () => 
         VALUES (?, ?, ?, ?, ?, ?)
       `).run("/some/file.ts", "deadbeef", 1, "2026-05-15T00:00:00Z", 19, 1);
       db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES ('last_build', ?)").run("2026-05-15T00:00:00Z");
-      db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES ('embedding_model', ?)").run("Xenova/all-MiniLM-L6-v2");
+      db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES ('embedding_model', ?)").run("nomic-ai/nomic-embed-text-v1.5");
     } finally {
       db.close();
     }
 
     const read = mod.loadIndex();
     expect(read.lastBuild).toBe("2026-05-15T00:00:00Z");
-    expect(read.embeddingModel).toBe("Xenova/all-MiniLM-L6-v2");
+    expect(read.embeddingModel).toBe("nomic-ai/nomic-embed-text-v1.5");
     expect(read.chunks).toHaveLength(1);
     expect(read.chunks[0].id).toBe("abc-1");
     expect(read.chunks[0].file).toBe("/some/file.ts");
@@ -1064,7 +1064,7 @@ describe("Storage (loadConfig/saveConfig/loadIndex/saveIndex/ensureDir)", () => 
         INSERT INTO chunks(id, file_path, chunk_content, line_start, line_end, chunk_hash, indexed_at, tokens)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run("clear-1", "/some/clear.ts", "hello world", 1, 2, "cafebabe", "2026-05-15T00:00:00Z", 3);
-      const vec = new Float32Array(384).fill(0.2);
+      const vec = new Float32Array(768).fill(0.2);
       db.prepare("INSERT INTO chunks_vec(rowid, embedding) VALUES (CAST(? AS INTEGER), ?)").run(
         Number(r.lastInsertRowid),
         Buffer.from(vec.buffer, vec.byteOffset, vec.byteLength),
@@ -1074,7 +1074,7 @@ describe("Storage (loadConfig/saveConfig/loadIndex/saveIndex/ensureDir)", () => 
         VALUES (?, ?, ?, ?, ?, ?)
       `).run("/some/clear.ts", "cafebabe", 1, "2026-05-15T00:00:00Z", 11, 1);
       db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES ('last_build', ?)").run("2026-05-15T00:00:00Z");
-      db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES ('embedding_model', ?)").run("Xenova/all-MiniLM-L6-v2");
+      db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES ('embedding_model', ?)").run("nomic-ai/nomic-embed-text-v1.5");
     } finally {
       db.close();
     }
@@ -1089,7 +1089,7 @@ describe("Storage (loadConfig/saveConfig/loadIndex/saveIndex/ensureDir)", () => 
     expect(stats.lastBuild).toBe("");
     // Embedding-model metadata survives a clear — it describes the configured
     // model, not indexed content.
-    expect(stats.embeddingModel).toBe("Xenova/all-MiniLM-L6-v2");
+    expect(stats.embeddingModel).toBe("nomic-ai/nomic-embed-text-v1.5");
 
     const idx = mod.loadIndex();
     expect(idx.chunks).toEqual([]);
@@ -1335,7 +1335,7 @@ describe("before_agent_start: 24h auto-refresh", () => {
         INSERT INTO chunks(id, file_path, chunk_content, line_start, line_end, chunk_hash, indexed_at, tokens)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run("test-1", opts.filePath, "const x = 1;", 1, 1, "abc", opts.lastBuild, 5);
-      const vec = new Float32Array(384).fill(0.1);
+      const vec = new Float32Array(768).fill(0.1);
       db.prepare("INSERT INTO chunks_vec(rowid, embedding) VALUES (CAST(? AS INTEGER), ?)").run(
         Number(r.lastInsertRowid),
         Buffer.from(vec.buffer, vec.byteOffset, vec.byteLength),

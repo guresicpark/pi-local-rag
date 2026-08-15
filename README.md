@@ -4,8 +4,8 @@ Local hybrid RAG pipeline for the [Pi coding agent](https://github.com/badlogic/
 
 ## Features
 
-- **Hybrid BM25 + vector search** — SQLite FTS5 for keyword scoring, [`sqlite-vec`](https://github.com/asg017/sqlite-vec) for 384-dim cosine NN, blended at retrieval time
-- **Local ONNX embeddings** — `Xenova/all-MiniLM-L6-v2` via Transformers.js (~23 MB model, runs fully offline after first download)
+- **Hybrid BM25 + vector search** — SQLite FTS5 for keyword scoring, [`sqlite-vec`](https://github.com/asg017/sqlite-vec) for 768-dim cosine NN, blended at retrieval time
+- **Local ONNX embeddings** — `nomic-ai/nomic-embed-text-v1.5` via Transformers.js (~111 MB quantized model, runs fully offline after first download)
 - **Many file formats** — text, source code, Markdown, JSON, YAML, plus PDF (with optional OCR fallback for scanned docs), DOCX, HTML (auto-converted to Markdown)
 - **Per-project storage** — walks up from cwd looking for `.pi/rag/`; falls back to `~/.pi/rag/` global store
 - **Tracked paths + exclude patterns** — `/rag index <path>` remembers what to keep current; gitignore-style `/rag exclude` for `dist/`, `*.log`, etc.
@@ -72,7 +72,7 @@ $ /rag status
   Chunks:           1847
   Vectors:          1847  (100% coverage)
   Total tokens:     438,219
-  Embedding model:  Xenova/all-MiniLM-L6-v2
+  Embedding model:  nomic-ai/nomic-embed-text-v1.5
   Last build:       2026-05-26T20:14:03.221Z
   Storage:          /Users/you/code/my-app/.pi/rag (project)
 
@@ -134,7 +134,7 @@ The extension registers three tools the agent can call directly:
 
 ## How It Works
 
-1. **Index** — files are chunked (~50 lines each, broken at blank lines where possible), embedded with `Xenova/all-MiniLM-L6-v2` (384-dim), and stored in SQLite. PDF/DOCX go through `pdf-parse`/`mammoth`; HTML is converted to Markdown via `turndown`; scanned PDFs fall back to OCR (`pdftoppm` + `tesseract`) when the system tools are installed.
+1. **Index** — files are chunked (~50 lines each, broken at blank lines where possible), embedded with `nomic-ai/nomic-embed-text-v1.5` (768-dim), and stored in SQLite. PDF/DOCX go through `pdf-parse`/`mammoth`; HTML is converted to Markdown via `turndown`; scanned PDFs fall back to OCR (`pdftoppm` + `tesseract`) when the system tools are installed.
 2. **Search** — FTS5 `bm25()` + `sqlite-vec` cosine NN, normalized and blended: `alpha × BM25 + (1-alpha) × cosine` (default `alpha=0.4`). Filename matches on the first query term get a 1.5× boost.
 3. **Auto-inject** — before every agent turn, the user's prompt is searched against the index and relevant chunks are appended after the prompt as a hidden `customType: "rag"` message (KV-cache friendly — the system prompt is unchanged across turns).
 4. **Auto-refresh** — if the index is older than 24 h, the `before_agent_start` hook re-walks tracked paths and re-indexes new/changed files in the background. Throttled to one stale check per hour.
@@ -169,7 +169,7 @@ Auto-injection is on by default. Config lives in `<ragDir>/config.json`:
 ## Testing
 
 ```bash
-npm test                          # full suite (downloads ~23 MB model on first run)
+npm test                          # full suite (downloads ~111 MB model on first run)
 SKIP_EMBEDDING_TESTS=1 npm test   # skip the real-ONNX semantic tests
 ```
 

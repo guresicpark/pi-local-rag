@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Embedding model swap**: `Xenova/all-MiniLM-L6-v2` (384-dim, ~23 MB) → `nomic-ai/nomic-embed-text-v1.5` (768-dim, q8-quantized ONNX, ~111 MB download). Queries and documents are prefixed with the nomic `search_query:` / `search_document:` task instructions as required by the model card. Existing stores are auto-migrated on first open: the stale `chunks_vec` table and indexed content are dropped (tracked paths survive in `config.json`) — run `/rag rebuild` to re-index.
+
 ## 0.4.1
 
 - **Docs refresh**: README rewritten for 0.4.0 feature set — SQLite/FTS5/sqlite-vec storage, PDF/DOCX/HTML extraction, OCR fallback, per-project store, tracked paths + exclude patterns, 24 h auto-refresh, trailing-message auto-injection. Commands table expanded with `/rag find`, `/rag refresh`, `/rag rebuild --force`, `/rag exclude`, `/rag help`. Optional OCR install instructions (`brew install poppler tesseract tesseract-lang` / `apt install poppler-utils tesseract-ocr ...`). New "Testing" section noting `SKIP_EMBEDDING_TESTS` and the tesseract-absent OCR skip.

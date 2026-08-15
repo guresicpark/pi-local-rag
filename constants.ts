@@ -3,8 +3,13 @@
 export const RST = "\x1b[0m", B = "\x1b[1m", D = "\x1b[2m";
 export const GREEN = "\x1b[32m", YELLOW = "\x1b[33m", CYAN = "\x1b[36m", RED = "\x1b[31m", MAGENTA = "\x1b[35m";
 
-export const EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2";
-export const VECTOR_DIM = 384;
+export const EMBEDDING_MODEL = "nomic-ai/nomic-embed-text-v1.5";
+export const VECTOR_DIM = 768;
+
+// nomic-embed-text-v1.5 requires task-type prefixes on inputs (see model
+// card). Queries and indexed documents must use different prefixes.
+export const QUERY_PREFIX = "search_query: ";
+export const DOC_PREFIX = "search_document: ";
 
 export const DEFAULT_TEXT_EXTS = [
   ".md", ".mdx", ".txt", ".rst",

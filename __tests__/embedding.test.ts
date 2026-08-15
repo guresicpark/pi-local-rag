@@ -1,15 +1,15 @@
 /**
  * Embedding tests — exercise the real local ONNX pipeline.
  *
- * The Xenova/all-MiniLM-L6-v2 model (~23 MB) is fetched from HuggingFace by
- * Transformers.js on first call to `embed()`. Subsequent runs read from the
- * Transformers.js cache (~/.cache/huggingface/...). No fixture data is bundled
- * with the repo.
+ * The nomic-ai/nomic-embed-text-v1.5 model (~111 MB quantized) is fetched
+ * from HuggingFace by Transformers.js on first call to `embed()`. Subsequent
+ * runs read from the Transformers.js cache (~/.cache/huggingface/...). No
+ * fixture data is bundled with the repo.
  *
  * This file lives separately from __tests__/index.test.ts because that file
  * mocks @huggingface/transformers at module scope (to keep the SQLite-era
  * hybridSearch tests fast and deterministic). The mock returns a constant
- * 384-dim vector, which trivially fails normalization + semantic-similarity
+ * 768-dim vector, which trivially fails normalization + semantic-similarity
  * checks. Splitting matches the upstream fork's layout — kallewoof's
  * __tests__/embedding.test.ts has no mock; __tests__/index.test.ts does.
  *
@@ -23,7 +23,9 @@ import {
 } from "../index.ts";
 
 const skip = process.env.SKIP_EMBEDDING_TESTS === "1";
-const EMBED_TIMEOUT = 120_000;
+// Generous: the first call includes the ~111 MB model download + ONNX
+// session init; later calls reuse the cached pipeline.
+const EMBED_TIMEOUT = 300_000;
 
 // Close the cached DB singleton after every test so it can't leak into the next test
 afterEach(async () => {
@@ -32,10 +34,10 @@ afterEach(async () => {
 });
 
 describe("embed (real ONNX)", () => {
-  it.skipIf(skip)("returns a 384-dim unit-normalized vector for a single string", async () => {
+  it.skipIf(skip)("returns a 768-dim unit-normalized vector for a single string", async () => {
     const v = await embed("hello world");
     expect(Array.isArray(v)).toBe(true);
-    expect(v.length).toBe(384);
+    expect(v.length).toBe(768);
     const norm = Math.sqrt(v.reduce((s, x) => s + x * x, 0));
     expect(Math.abs(norm - 1)).toBeLessThan(1e-3);
     expect(v.some(x => x !== 0)).toBe(true);

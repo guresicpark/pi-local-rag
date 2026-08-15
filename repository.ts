@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import { VECTOR_DIM } from "./constants.ts";
+import { EMBEDDING_MODEL, VECTOR_DIM } from "./constants.ts";
 
 /**
  * Centralizes every raw SQL statement used across db.ts, indexing.ts,
@@ -67,6 +67,24 @@ export function initSchema(db: Database.Database) {
     -- without this index each delete full-scans the chunks table.
     CREATE INDEX IF NOT EXISTS idx_chunks_file_path ON chunks(file_path);
   `);
+
+  // Embedding-model swap: vectors produced by a different model are
+  // incompatible (dimension/prefix mismatch), and chunks_vec keeps its
+  // original float[N] definition from when the store was first created.
+  // Drop the stale vec table + indexed content; trackedPaths live in
+  // config.json and survive, so `/rag rebuild` restores the index.
+  const storedModel = getMetadata(db, MetadataKey.EmbeddingModel);
+  if (storedModel && storedModel !== EMBEDDING_MODEL) {
+    db.exec("DROP TABLE IF EXISTS chunks_vec; DELETE FROM chunks; DELETE FROM files;");
+    db.exec("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')");
+    db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
+      embedding float[${VECTOR_DIM}]
+    );`);
+    deleteMetadata(db, MetadataKey.EmbeddingModel);
+    process.stderr.write(
+      `[rag] embedding model changed (${storedModel} → ${EMBEDDING_MODEL}); index cleared — run /rag rebuild to re-index\n`,
+    );
+  }
 }
 
 // ─── Chunks ──────────────────────────────────────────────────────────────

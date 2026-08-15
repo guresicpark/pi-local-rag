@@ -1,17 +1,20 @@
-import { EMBEDDING_MODEL } from "./constants.ts";
+import { EMBEDDING_MODEL, QUERY_PREFIX, DOC_PREFIX } from "./constants.ts";
 
 let _pipeline: any = null;
 
 async function getEmbedder() {
   if (_pipeline) return _pipeline;
   const { pipeline } = await import("@huggingface/transformers");
-  _pipeline = await pipeline("feature-extraction", EMBEDDING_MODEL);
+  // q8 = quantized ONNX weights (~111 MB vs ~547 MB fp32) — keeps the
+  // first-run download reasonable with negligible quality loss.
+  _pipeline = await pipeline("feature-extraction", EMBEDDING_MODEL, { dtype: "q8" });
   return _pipeline;
 }
 
+/** Embed a search query (applies the nomic `search_query:` prefix). */
 export async function embed(text: string): Promise<number[]> {
   const embedder = await getEmbedder();
-  const output = await embedder(text, { pooling: "mean", normalize: true });
+  const output = await embedder(QUERY_PREFIX + text, { pooling: "mean", normalize: true });
   return Array.from(output.data as Float32Array);
 }
 
@@ -46,10 +49,11 @@ export async function embedBatch(
   for (let start = 0; start < texts.length; start += BATCH_SIZE) {
     const batch = texts.slice(start, start + BATCH_SIZE);
     // Pass the whole batch in a single forward pass — the model returns a
-    // Tensor with dims [batchSize, VECTOR_DIM].
-    const output = await embedder(batch, { pooling: "mean", normalize: true });
+    // Tensor with dims [batchSize, VECTOR_DIM]. Documents get the nomic
+    // `search_document:` prefix.
+    const output = await embedder(batch.map(t => DOC_PREFIX + t), { pooling: "mean", normalize: true });
     const flat = output.data as Float32Array;
-    const dim = flat.length / batch.length; // should equal VECTOR_DIM (384)
+    const dim = flat.length / batch.length; // should equal VECTOR_DIM (768)
 
     for (let j = 0; j < batch.length; j++) {
       results[start + j] = Array.from(flat.subarray(j * dim, (j + 1) * dim));

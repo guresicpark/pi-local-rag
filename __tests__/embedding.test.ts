@@ -7,7 +7,7 @@
  * with the repo.
  *
  * This file lives separately from __tests__/index.test.ts because that file
- * mocks @xenova/transformers at module scope (to keep the SQLite-era
+ * mocks @huggingface/transformers at module scope (to keep the SQLite-era
  * hybridSearch tests fast and deterministic). The mock returns a constant
  * 384-dim vector, which trivially fails normalization + semantic-similarity
  * checks. Splitting matches the upstream fork's layout — kallewoof's

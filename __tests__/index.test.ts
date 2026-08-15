@@ -16,10 +16,10 @@ import ignore from "ignore";
 import Database from "better-sqlite3";
 import { load as loadVec } from "sqlite-vec";
 
-// Mock @xenova/transformers so search/embed tests don't load the ~23 MB ONNX
+// Mock @huggingface/transformers so search/embed tests don't load the ~23 MB ONNX
 // model. The mocked pipeline handles both single-string and batched-array
 // inputs (commit 849e485 fix).
-vi.mock("@xenova/transformers", () => ({
+vi.mock("@huggingface/transformers", () => ({
   pipeline: vi.fn().mockResolvedValue(
     vi.fn().mockImplementation(async (texts: string | string[]) => {
       // Mirror the real Xenova/transformers batch API: always return a single
@@ -918,7 +918,7 @@ describe("/rag find glob matching", () => {
 // ─── embed + hybrid (real ONNX pipeline; opt-out via SKIP_EMBEDDING_TESTS) ──
 
 // (Real-ONNX embed + vector-path hybridSearch tests live in __tests__/embedding.test.ts —
-// that file deliberately doesn't mock @xenova/transformers, matching the
+// that file deliberately doesn't mock @huggingface/transformers, matching the
 // fork's split between index.test.ts (mocked) and embedding.test.ts (real).)
 
 // ─── Storage: loadConfig / saveConfig / loadIndex / saveIndex / ensureDir ───

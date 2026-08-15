@@ -4,7 +4,7 @@ let _pipeline: any = null;
 
 async function getEmbedder() {
   if (_pipeline) return _pipeline;
-  const { pipeline } = await import("@xenova/transformers");
+  const { pipeline } = await import("@huggingface/transformers");
   _pipeline = await pipeline("feature-extraction", EMBEDDING_MODEL);
   return _pipeline;
 }

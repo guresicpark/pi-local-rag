@@ -31,14 +31,14 @@
  *   config.ts        — RagConfig type, loadConfig / saveConfig, ext helpers
  *   index-store.ts   — Chunk / IndexMeta types, loadIndex / saveIndex (JSON)
  *   chunking.ts      — sha256, chunkText, collectFiles, extractText (txt/pdf/docx/html)
- *   embed.ts         — getEmbedder, embed, embedBatch (ONNX via @xenova/transformers)
+ *   embed.ts         — getEmbedder, embed, embedBatch (ONNX via @huggingface/transformers)
  *   search.ts        — cosineSimilarity, normalize, hybridSearch
  *   indexing.ts      — indexFiles (parallel Phase 1 read, sequential Phase 2 embed)
  *   index.ts         — extension entry point (this file) + re-exports
  */
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import type { AutocompleteItem } from "@mariozechner/pi-tui";
-import { Type } from "@sinclair/typebox";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { AutocompleteItem } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
 import { existsSync } from "node:fs";
 import { resolve, extname, basename, relative } from "node:path";
 import ignore from "ignore";

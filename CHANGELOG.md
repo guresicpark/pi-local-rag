@@ -46,14 +46,14 @@
 
 ## 0.2.0
 
-- **Hybrid RAG**: BM25 + local vector embeddings via `@xenova/transformers` (Transformers.js)
+- **Hybrid RAG**: BM25 + local vector embeddings via `@huggingface/transformers` (Transformers.js)
 - **Auto-injection**: `before_agent_start` hook injects relevant chunks into every LLM prompt
 - **Embedding model**: `Xenova/all-MiniLM-L6-v2` (384-dim, ~23MB, downloads once, runs fully offline)
 - **Score transparency**: search results now show `bm25`, `vector`, and `hybrid` scores
 - **`/lens rag on|off`**: toggle auto-injection at runtime *(renamed to `/rag on|off` in 0.3.0)*
 - **`/lens status`**: now shows vector coverage % *(renamed to `/rag status` in 0.3.0)*
 - **Config file**: `~/.pi/lens/config.json` for `ragEnabled`, `ragTopK`, `ragScoreThreshold`, `ragAlpha` *(moved to `~/.pi/rag/` in 0.3.0)*
-- Bumped to `dependencies` for `@xenova/transformers`
+- Bumped to `dependencies` for `@huggingface/transformers`
 
 ## 0.1.0
 

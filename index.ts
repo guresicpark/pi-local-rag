@@ -197,7 +197,16 @@ export default function (pi: ExtensionAPI) {
             ctx.ui.setWidget("rag", [
               `${B}${CYAN}Indexing${RST}  ${bar}  ${GREEN}${pct}%${RST}`,
               `${D}file:    ${RST}${filename}`,
-              `${D}done:    ${RST}${GREEN}${current - skipped} embedded${RST}  ${D}${skipped} unchanged${RST}`,
+              `${D}done:    ${RST}${GREEN}${current - skipped} chunked${RST}  ${D}${skipped} unchanged${RST}`,
+            ]);
+          },
+          onEmbed(done, total) {
+            const pct = Math.round((done / total) * 100);
+            const bar = progressBar(done, total);
+            ctx.ui.setStatus("rag", `■ Embedding ${pct}% │ ${done}/${total} chunks`);
+            ctx.ui.setWidget("rag", [
+              `${B}${CYAN}Embedding${RST}  ${bar}  ${GREEN}${pct}%${RST}`,
+              `${D}chunks:  ${RST}${done}/${total}`,
             ]);
           },
           onChunk(ci, total, filename) {
@@ -389,6 +398,15 @@ export default function (pi: ExtensionAPI) {
               `${B}${CYAN}Refreshing${RST}  ${bar}  ${GREEN}${pct}%${RST}`,
               `${D}file:    ${RST}${filename}`,
               `${D}done:    ${RST}${GREEN}${current - skipped} new/changed${RST}  ${D}${skipped} unchanged${RST}`,
+            ]);
+          },
+          onEmbed(done, total) {
+            const pct = Math.round((done / total) * 100);
+            const bar = progressBar(done, total);
+            ctx.ui.setStatus("rag", `■ Embedding ${pct}% │ ${done}/${total} chunks`);
+            ctx.ui.setWidget("rag", [
+              `${B}${CYAN}Embedding${RST}  ${bar}  ${GREEN}${pct}%${RST}`,
+              `${D}chunks:  ${RST}${done}/${total}`,
             ]);
           },
           onChunk(ci, total, filename) {

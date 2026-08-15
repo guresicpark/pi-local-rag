@@ -146,6 +146,9 @@ export async function indexFiles(
     const flushGroup = async () => {
       if (groupChunks.length === 0) return;
       const texts = groupChunks.map(g => g.fw.rawChunks[g.ci].content);
+      // Fire before the batch too, so the TUI flips to the "Embedding" widget
+      // (covering first-run model download) instead of the stale 100% screen.
+      progress?.onEmbed?.(globalChunkIdx - groupChunks.length, totalChunks);
       stderrProgress(`Embedding ${globalChunkIdx - groupChunks.length + 1}…${globalChunkIdx}/${totalChunks} chunks`);
       const vectors = await embedBatch(texts);
       for (let vi = 0; vi < groupChunks.length; vi++) {

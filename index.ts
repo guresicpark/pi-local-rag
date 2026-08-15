@@ -136,11 +136,14 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ── /rag command ──
+  /** Tracks whether the /rag status widget is currently shown, so the
+   *  command toggles: show on first call, hide on the next. */
+  let statusWidgetVisible = false;
   const RAG_SUBCOMMANDS: { value: string; label: string; description: string }[] = [
     { value: "index",    label: "index",    description: "Index a file or directory" },
     { value: "search",   label: "search",   description: "Search the index" },
     { value: "find",     label: "find",     description: "List indexed files matching a glob" },
-    { value: "status",   label: "status",   description: "Show index statistics" },
+    { value: "status",   label: "status",   description: "Toggle index statistics display" },
     { value: "rebuild",  label: "rebuild",  description: "Re-embed tracked files (--force to skip hash check + wipe DB)" },
     { value: "refresh",  label: "refresh",  description: "Incremental refresh — new/changed files only" },
     { value: "clear",    label: "clear",    description: "Clear the index" },
@@ -569,7 +572,12 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      // ── status (default) ──
+      // ── status (default, toggles the widget) ──
+      if (statusWidgetVisible) {
+        statusWidgetVisible = false;
+        ctx.ui.setWidget("rag-status", undefined);
+        return;
+      }
       const index = loadIndex();
       const config = loadConfig();
       const stats = getIndexStats(getDbConn());
@@ -623,6 +631,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       ctx.ui.setWidget("rag-status", lines);
+      statusWidgetVisible = true;
     },
   });
 

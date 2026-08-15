@@ -90,6 +90,13 @@ export class RagDatabase {
 export const getDbConn   = () => RagDatabase.instance;
 export const closeDbConn = () => { RagDatabase.close(); };
 
+/** @deprecated Use getDbConn() (singleton) or getFreshDbConn() (throwaway). */
+export const openDb = (dir?: string) => RagDatabase.open(dir);
+/** @deprecated Use getDbConn(). */
+export const getDb = () => RagDatabase.instance;
+/** @deprecated Kept for API compatibility with pre-refactor consumers. */
+export { float32ToBuffer } from "./repository.ts";
+
 /**
  * Returns a brand-new, throwaway DB connection. **Bypasses the singleton** —
  * the caller is responsible for closing it. Use `getDbConn()` for normal access.

@@ -142,7 +142,7 @@ export function getAllChunks(db: Database.Database): LoadedChunk[] {
  * come in as `number[]`; every caller converts through this before it
  * touches chunks_vec.
  **/
-function float32ToBuffer(arr: number[]): Buffer {
+export function float32ToBuffer(arr: number[]): Buffer {
   const f = new Float32Array(arr);
   return Buffer.from(f.buffer, f.byteOffset, f.byteLength);
 }

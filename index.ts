@@ -46,7 +46,7 @@ import ignore from "ignore";
 import { RST, B, D, GREEN, CYAN } from "./constants.ts";
 import { getRagDir, GLOBAL_RAG_DIR } from "./store.ts";
 import { loadConfig, saveConfig, normalizeExt, resolveExtensions } from "./config.ts";
-import { openDb, loadIndex, saveIndex, getIndexStats } from "./db.ts";
+import { getDbConn, loadIndex, saveIndex, getIndexStats } from "./db.ts";
 import { collectFiles, collectFromTracked, collectFromTrackedAsync, isExcludedByConfig } from "./chunking.ts";
 import { hybridSearch } from "./search.ts";
 import { indexFiles, isIndexStale } from "./indexing.ts";
@@ -58,7 +58,7 @@ export { getRagDir, GLOBAL_RAG_DIR, LEGACY_DIR } from "./store.ts";
 export type { RagConfig } from "./config.ts";
 export { loadConfig, saveConfig, defaultConfig, normalizeExt, resolveExtensions } from "./config.ts";
 export type { Chunk, IndexMeta, IndexStats } from "./db.ts";
-export { openDb, getDb, loadIndex, saveIndex, getIndexStats, initSchema, float32ToBuffer } from "./db.ts";
+export { openDb, getDb, getDbConn, closeDbConn, getFreshDbConn, loadIndex, saveIndex, getIndexStats, initSchema, float32ToBuffer } from "./db.ts";
 export {
   sha256, chunkText, collectFiles, collectFilesAsync, collectFromTracked, collectFromTrackedAsync,
   isExcludedByConfig, extractText, getOcrTooling, isSparsePdfText,
@@ -83,14 +83,13 @@ export default function (pi: ExtensionAPI) {
     const config = loadConfig();
     if (!config.ragEnabled) return;
 
-    const database = openDb();
+    const database = getDbConn();
     try {
       const stats = getIndexStats(database);
       if (stats.totalChunks === 0) return;
 
-      const indexMeta = { chunks: [], files: {}, lastBuild: stats.lastBuild, embeddingModel: stats.embeddingModel };
       const now = Date.now();
-      if (isIndexStale(indexMeta) && now - lastStaleCheckMs > STALE_CHECK_INTERVAL_MS) {
+      if (isIndexStale(stats) && now - lastStaleCheckMs > STALE_CHECK_INTERVAL_MS) {
         lastStaleCheckMs = now;
         // Re-walk tracked paths so new files (and files of newly-supported
         // extensions, e.g. PDF/DOCX added in a later version) are picked up.
@@ -105,7 +104,7 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      const results = await hybridSearch(event.prompt, indexMeta, config.ragTopK, config.ragAlpha, database);
+      const results = await hybridSearch(event.prompt, config.ragTopK, config.ragAlpha, database);
       const relevant = results.filter(r => r.hybrid >= config.ragScoreThreshold);
       if (!relevant.length) return;
 
@@ -220,15 +219,13 @@ export default function (pi: ExtensionAPI) {
       if (cmd === "search") {
         const query = parts.slice(1).join(" ");
         if (!query) { ctx.ui.notify("Usage: /rag search <query>", "warning"); return; }
-        const index = loadIndex();
         const config = loadConfig();
-        const results = await hybridSearch(query, index, 10, config.ragAlpha);
+        const results = await hybridSearch(query, 10, config.ragAlpha);
         if (!results.length) { ctx.ui.notify(`No results for: ${query}`, "warning"); return; }
 
         const th = ctx.ui.theme;
-        const database = openDb();
+        const database = getDbConn();
         const hasVectors = getIndexStats(database).embeddedCount > 0;
-        database.close();
         const lines: string[] = [
           th.bold(th.fg("accent", "🔍 ") + `${results.length} results for "${query}"`) +
             "  " + th.fg("dim", hasVectors ? "hybrid BM25+vector" : "BM25 only"),
@@ -263,7 +260,7 @@ export default function (pi: ExtensionAPI) {
         const rebuildArgs = parts.slice(1);
         const force = rebuildArgs.includes("--force");
 
-        const database = openDb();
+        const database = getDbConn();
         const config = loadConfig();
         try {
           const indexedRows = database.prepare("SELECT path FROM files").all() as Array<{ path: string }>;
@@ -355,8 +352,8 @@ export default function (pi: ExtensionAPI) {
 
           const secs = (result.durationMs / 1000).toFixed(1);
           ctx.ui.notify(`✅ Rebuilt: ${result.indexed} re-indexed · ${result.skipped} unchanged · ${droppedFiles.length} deleted · ${result.chunks} chunks · ${secs}s`, "info");
-        } finally {
-          database.close();
+        } catch (err) {
+          ctx.ui.notify(`Rebuild failed: ${(err as Error).message}`, "error");
         }
         return;
       }
@@ -575,9 +572,7 @@ export default function (pi: ExtensionAPI) {
       // ── status (default) ──
       const index = loadIndex();
       const config = loadConfig();
-      const database = openDb();
-      const stats = getIndexStats(database);
-      database.close();
+      const stats = getIndexStats(getDbConn());
       const fileCount = stats.totalFiles;
       const totalTokens = stats.totalTokens;
       const embeddedCount = stats.embeddedCount;
@@ -667,10 +662,10 @@ export default function (pi: ExtensionAPI) {
       limit: Type.Optional(Type.Number({ description: "Max results (default 10)" })),
     }),
     execute: async (_toolCallId, params) => {
-      const index = loadIndex();
-      if (!index.chunks.length) return { content: [{ type: "text" as const, text: "pi-local-rag index is empty. Run rag_index first." }], details: undefined };
+      const stats = getIndexStats(getDbConn());
+      if (!stats.totalChunks) return { content: [{ type: "text" as const, text: "pi-local-rag index is empty. Run rag_index first." }], details: undefined };
       const config = loadConfig();
-      const results = await hybridSearch(params.query, index, params.limit ?? 10, config.ragAlpha);
+      const results = await hybridSearch(params.query, params.limit ?? 10, config.ragAlpha);
       if (!results.length) return { content: [{ type: "text" as const, text: `No results for: ${params.query}` }], details: undefined };
       const text = JSON.stringify(results.map(r => ({
         file: r.chunk.file,
@@ -690,9 +685,7 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({}),
     execute: async (_toolCallId) => {
       const config = loadConfig();
-      const database = openDb();
-      const stats = getIndexStats(database);
-      database.close();
+      const stats = getIndexStats(getDbConn());
       const embeddedCount = stats.embeddedCount;
       const text = JSON.stringify({
         files: stats.totalFiles,

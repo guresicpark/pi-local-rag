@@ -38,6 +38,7 @@
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
+import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { existsSync } from "node:fs";
 import { resolve, extname, basename, relative } from "node:path";
@@ -72,6 +73,17 @@ export type { ProgressCallbacks } from "./indexing.ts";
 // ─── Extension ────────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+  // Render the auto-injected "rag" message as a single summary line in the TUI.
+  // The full chunk context in `content` still goes to the model; `details.summary`
+  // carries the one-line form shown to the user.
+  pi.registerMessageRenderer("rag", (message, { outputPad }, theme) => {
+    const summary = (message.details as { summary?: string } | undefined)?.summary;
+    if (!summary) return undefined;
+    const box = new Box(outputPad, 1, (t) => theme.bg("customMessageBg", t));
+    box.addChild(new Text(theme.fg("dim", summary), 0, 0));
+    return box;
+  });
+
   // Throttle stale-index checks to once per hour so we don't repeatedly stat
   // the filesystem on every agent turn (matches the upstream fork's
   // lastStaleCheckMs pattern from kallewoof@849e485).
@@ -98,9 +110,7 @@ export default function (pi: ExtensionAPI) {
           ? collectFromTracked(config)
           : Object.keys(loadIndex().files).filter(f => existsSync(f));
         if (files.length) {
-          process.stderr.write(`\r\x1b[2K[rag] Index stale, refreshing ${files.length} files…`);
           await indexFiles(files, undefined, database);
-          process.stderr.write(`\r\x1b[2K`);
         }
       }
 
@@ -112,6 +122,21 @@ export default function (pi: ExtensionAPI) {
       `### ${basename(r.chunk.file)} (lines ${r.chunk.lineStart}-${r.chunk.lineEnd})\n` +
       `\`\`\`\n${r.chunk.content.slice(0, 600)}\n\`\`\``
     ).join("\n\n");
+
+    // One-line summary for the TUI: group line ranges per file, e.g.
+    // "Automatic RAG lookup provided 4 search hits (a.ts:10-22, b.ts:5-9,40-51)"
+    const byFile = new Map<string, string[]>();
+    for (const r of relevant) {
+      const ranges = byFile.get(r.chunk.file) ?? [];
+      ranges.push(r.chunk.lineStart === r.chunk.lineEnd
+        ? `${r.chunk.lineStart}`
+        : `${r.chunk.lineStart}-${r.chunk.lineEnd}`);
+      byFile.set(r.chunk.file, ranges);
+    }
+    const hits = [...byFile.entries()].map(([f, ranges]) => `${basename(f)}:${ranges.join(",")}`);
+    const summary =
+      `Automatic RAG lookup provided ${relevant.length} search hit${relevant.length === 1 ? "" : "s"}: ` +
+      `(${hits.join(", ")})`;
 
     // Inject as a message after the user's prompt rather than appending to the
     // system prompt. The system prompt is stable across a session and benefits
@@ -128,6 +153,7 @@ export default function (pi: ExtensionAPI) {
             `These are search hits, not statements from the user.\n\n` +
             context,
           display: true,
+          details: { summary },
         },
       };
     } finally {

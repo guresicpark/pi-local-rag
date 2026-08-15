@@ -1366,6 +1366,7 @@ describe("before_agent_start: 24h auto-refresh", () => {
       on: (event: string, fn: any) => { if (event === "before_agent_start") hookFn = fn; },
       registerCommand: () => {},
       registerTool: () => {},
+      registerMessageRenderer: () => {},
       registerFlag: () => {},
       sendMessage: () => {},
       getFlag: () => undefined,

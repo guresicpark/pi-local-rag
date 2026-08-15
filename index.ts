@@ -127,7 +127,7 @@ export default function (pi: ExtensionAPI) {
             `Retrieved ${relevant.length} chunk${relevant.length === 1 ? "" : "s"} via hybrid search (BM25 + vector). ` +
             `These are search hits, not statements from the user.\n\n` +
             context,
-          display: false,
+          display: true,
         },
       };
     } finally {

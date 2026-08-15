@@ -1493,6 +1493,143 @@ describe("before_agent_start: 24h auto-refresh", () => {
   });
 });
 
+// ─── session_start auto-enable ──────────────────────────────────────────────
+//
+// At startup, if the store in scope for cwd has chunks indexed under the
+// session cwd, the extension flips ragEnabled on and notifies the user —
+// mirroring what /rag on shows.
+
+describe("session_start: auto-enable when chunks exist for cwd", () => {
+  let ragDir: string;
+  let cwdSandbox: string;
+  let savedCwd: string;
+  let savedRagDir: string | undefined;
+  let mod: typeof import("../index.ts");
+  let extensionFactory: typeof import("../index.ts").default;
+
+  function makePi() {
+    let hookFn: ((event: any, ctx: any) => any) | undefined;
+    const pi = {
+      on: (event: string, fn: any) => { if (event === "session_start") hookFn = fn; },
+      registerCommand: () => {},
+      registerTool: () => {},
+      registerMessageRenderer: () => {},
+      registerFlag: () => {},
+      sendMessage: () => {},
+      getFlag: () => undefined,
+    };
+    const fire = (reason: string, cwd: string) => {
+      const notifications: Array<{ message: string; type?: string }> = [];
+      const ctx = { cwd, ui: { notify: (m: string, t?: string) => notifications.push({ message: m, type: t }) } };
+      return { result: hookFn!({ type: "session_start", reason }, ctx), notifications };
+    };
+    return { pi, fire };
+  }
+
+  function seedIndex(opts: { filePath: string }) {
+    const db = mod.getFreshDbConn();
+    try {
+      db.exec(`DELETE FROM chunks_vec; DELETE FROM chunks; DELETE FROM files; DELETE FROM metadata;`);
+      db.prepare(`
+        INSERT INTO chunks(id, file_path, chunk_content, line_start, line_end, chunk_hash, indexed_at, tokens)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run("test-1", opts.filePath, "const x = 1;", 1, 1, "abc", new Date().toISOString(), 5);
+      db.prepare(`
+        INSERT OR REPLACE INTO files(path, hash, chunks, indexed, size, embedded)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(opts.filePath, "h1", 1, new Date().toISOString(), 10, 1);
+    } finally {
+      db.close();
+    }
+  }
+
+  function writeConfig(ragEnabled: boolean) {
+    writeFileSync(
+      join(ragDir, "config.json"),
+      JSON.stringify({ ragEnabled, ragTopK: 5, ragScoreThreshold: 0.1, ragAlpha: 0.4,
+        extraExtensions: [], excludeExtensions: [], trackedPaths: [], excludePatterns: [] }),
+    );
+  }
+
+  function readRagEnabled(): boolean {
+    return JSON.parse(readFileSync(join(ragDir, "config.json"), "utf-8")).ragEnabled;
+  }
+
+  beforeAll(async () => {
+    ragDir = realpathSync(mkdtempSync(join(tmpdir(), "pi-rag-sessstart-")));
+    cwdSandbox = realpathSync(mkdtempSync(join(tmpdir(), "pi-rag-sessstart-cwd-")));
+    savedCwd = process.cwd();
+    savedRagDir = process.env.PI_RAG_DIR;
+    process.env.PI_RAG_DIR = ragDir;
+    process.chdir(cwdSandbox);
+
+    vi.resetModules();
+    mod = await import("../index.ts");
+    extensionFactory = mod.default;
+  });
+
+  afterAll(() => {
+    process.chdir(savedCwd);
+    rmSync(ragDir, { recursive: true, force: true });
+    rmSync(cwdSandbox, { recursive: true, force: true });
+    if (savedRagDir !== undefined) process.env.PI_RAG_DIR = savedRagDir;
+    else delete process.env.PI_RAG_DIR;
+  });
+
+  it("enables RAG and notifies when chunks exist for cwd", () => {
+    seedIndex({ filePath: join(cwdSandbox, "src", "a.ts") });
+    writeConfig(false);
+    const { pi, fire } = makePi();
+    extensionFactory(pi as any);
+    const { notifications } = fire("startup", cwdSandbox);
+    expect(notifications).toEqual([{ message: "RAG auto-injection enabled", type: "info" }]);
+    expect(readRagEnabled()).toBe(true);
+  });
+
+  it("notifies when RAG was already enabled", () => {
+    seedIndex({ filePath: join(cwdSandbox, "a.ts") });
+    writeConfig(true);
+    const { pi, fire } = makePi();
+    extensionFactory(pi as any);
+    const { notifications } = fire("startup", cwdSandbox);
+    expect(notifications).toEqual([{ message: "RAG auto-injection enabled", type: "info" }]);
+    expect(readRagEnabled()).toBe(true);
+  });
+
+  it("does nothing when the index has no chunks", () => {
+    seedIndex({ filePath: join(cwdSandbox, "a.ts") });
+    const db = mod.getFreshDbConn();
+    db.exec(`DELETE FROM chunks_vec; DELETE FROM chunks; DELETE FROM files;`);
+    db.close();
+    writeConfig(false);
+    const { pi, fire } = makePi();
+    extensionFactory(pi as any);
+    const { notifications } = fire("startup", cwdSandbox);
+    expect(notifications).toEqual([]);
+    expect(readRagEnabled()).toBe(false);
+  });
+
+  it("does nothing when indexed files are outside cwd", () => {
+    seedIndex({ filePath: "/elsewhere/other-project/a.ts" });
+    writeConfig(false);
+    const { pi, fire } = makePi();
+    extensionFactory(pi as any);
+    const { notifications } = fire("startup", cwdSandbox);
+    expect(notifications).toEqual([]);
+    expect(readRagEnabled()).toBe(false);
+  });
+
+  it("ignores non-startup session starts", () => {
+    seedIndex({ filePath: join(cwdSandbox, "a.ts") });
+    writeConfig(false);
+    const { pi, fire } = makePi();
+    extensionFactory(pi as any);
+    const { notifications } = fire("resume", cwdSandbox);
+    expect(notifications).toEqual([]);
+    expect(readRagEnabled()).toBe(false);
+  });
+});
+
 // ─── getFreshDbConn: [Symbol.dispose] support ────────────────────────────────
 //
 // These tests verify the `using` declaration works with getFreshDbConn() and

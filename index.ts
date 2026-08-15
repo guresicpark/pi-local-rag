@@ -41,13 +41,13 @@ import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { existsSync } from "node:fs";
-import { resolve, extname, basename, relative } from "node:path";
+import { resolve, extname, basename, relative, isAbsolute, sep } from "node:path";
 import ignore from "ignore";
 
 import { RST, B, D, GREEN, CYAN } from "./constants.ts";
-import { getRagDir, GLOBAL_RAG_DIR } from "./store.ts";
+import { getRagDir, GLOBAL_RAG_DIR, dbFile } from "./store.ts";
 import { loadConfig, saveConfig, normalizeExt, resolveExtensions } from "./config.ts";
-import { getDbConn, closeDbConn, loadIndex, clearIndex, getIndexStats } from "./db.ts";
+import { getDbConn, closeDbConn, loadIndex, clearIndex, getIndexStats, getIndexedFiles } from "./db.ts";
 import { collectFiles, collectFromTracked, collectFromTrackedAsync, isExcludedByConfig } from "./chunking.ts";
 import { hybridSearch } from "./search.ts";
 import { indexFiles, isIndexStale } from "./indexing.ts";
@@ -161,6 +161,35 @@ export default function (pi: ExtensionAPI) {
       // database.close() directly leaves RagDatabase._instance pointing
       // at a dead connection and the next turn gets
       // "The database connection is not open".
+      closeDbConn();
+    }
+  });
+
+  // ── Auto-enable RAG at startup when indexed chunks exist for cwd ──
+  pi.on("session_start", (event, ctx) => {
+    if (event.reason !== "startup") return;
+
+    // Only consult an existing store — never create one as a side effect of
+    // the startup check.
+    const ragDir = getRagDir();
+    if (!existsSync(dbFile(ragDir))) return;
+
+    try {
+      if (getIndexStats().totalChunks === 0) return;
+
+      const underCwd = getIndexedFiles().some(f => {
+        const rel = relative(ctx.cwd, f.path);
+        return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+      });
+      if (!underCwd) return;
+
+      const config = loadConfig();
+      if (!config.ragEnabled) {
+        config.ragEnabled = true;
+        saveConfig(config);
+      }
+      ctx.ui.notify("Chunks found for current sesseion - RAG auto-injection enabled", "info");
+    } finally {
       closeDbConn();
     }
   });

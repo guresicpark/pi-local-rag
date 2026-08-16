@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import {
@@ -34,6 +35,17 @@ export function resolveModelCacheDir(): string {
   if (process.env.TRANSFORMERS_CACHE) return process.env.TRANSFORMERS_CACHE;
   if (process.env.HF_HOME) return join(process.env.HF_HOME, "transformers");
   return join(homedir(), ".cache", "huggingface", "transformers");
+}
+
+/**
+ * Whether a group's q8 ONNX weights are already present in the local model
+ * cache. Transformers.js stores files under
+ * `<cacheDir>/<org>/<model>/onnx/model_quantized.onnx` (q8 dtype adds the
+ * `_quantized` suffix) — if the weights file exists, loading the pipeline is
+ * fast local I/O; if not, first use triggers the ~111 MB / ~170 MB download.
+ */
+function isModelCached(modelId: string): boolean {
+  return existsSync(join(resolveModelCacheDir(), modelId, "onnx", "model_quantized.onnx"));
 }
 
 // One pipeline per group — nomic for prose, jina for code. The load promise
@@ -83,9 +95,9 @@ export const BATCH_SIZE = 64;
 
 export interface EmbedBatchOpts {
   onProgress?: (done: number, total: number) => void;
-  /** Fired right before a group's model is downloaded/loaded (only when not
-   *  already cached in this process) — lets the UI explain a multi-minute
-   *  cold-start instead of looking stuck. */
+  /** Fired right before a group's model is downloaded — only when the ONNX
+   *  weights are not already in the local HF cache — lets the UI explain a
+   *  multi-minute cold-start instead of looking stuck. */
   onModelLoad?: (modelId: string) => void;
 }
 
@@ -103,7 +115,12 @@ export async function embedBatchFor(
   opts: EmbedBatchOpts = {},
 ): Promise<number[][]> {
   if (texts.length === 0) return [];
-  if (!_pipelines.has(group)) opts.onModelLoad?.(EMBED_MODELS[group].id);
+  // Notify only on a true cold start: pipeline not yet loaded in this
+  // process AND weights missing from the on-disk cache. A warm disk cache
+  // loads in seconds, so the "downloading" notice would be noise.
+  if (!_pipelines.has(group) && !isModelCached(EMBED_MODELS[group].id)) {
+    opts.onModelLoad?.(EMBED_MODELS[group].id);
+  }
   const spec = EMBED_MODELS[group];
   const embedder = await getEmbedder(group);
   const results: number[][] = new Array(texts.length);

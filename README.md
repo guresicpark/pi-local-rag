@@ -44,7 +44,7 @@ The OCR fallback is silent when these tools aren't installed (logs one stderr hi
 | `/rag index <path>` | Index a file or directory (chunks → embeds → stores); adds the path to tracked paths |
 | `/rag search <query>` | Hybrid BM25 + vector search over the index |
 | `/rag find <glob>` | List indexed files matching a glob (e.g. `*.ts`, `src/*`) |
-| `/rag status` | Show index stats, active config, tracked paths, exclude patterns, storage scope |
+| `/rag` | Show index stats, active config, tracked paths, exclude patterns, storage scope (run again to hide) |
 | `/rag rebuild [--force]` | Re-walk tracked paths and re-embed all files. `--force` wipes the DB and bypasses the hash-cache check |
 | `/rag refresh` | Incremental refresh — only new/changed files (same code path as the 24 h auto-refresh) |
 | `/rag clear` | Wipe the entire index (tracked paths are preserved) |
@@ -65,7 +65,7 @@ file:    src/server/handlers/payments.ts
 done:    412 embedded · 0 unchanged
 ✅ Indexed 412 files (1,847 chunks) · 0 unchanged · 38.4s · tracking 1 path(s) · project store
 
-$ /rag status
+$ /rag
 🔍 pi-local-rag
 
   Files indexed:    412
@@ -147,7 +147,7 @@ Index data lives in `rag.db` (SQLite, WAL mode, with FTS5 + sqlite-vec extension
 2. **Walk-up** from `process.cwd()` looking for an existing `.pi/rag/` directory (stopping before `$HOME`)
 3. **Global** fallback at `~/.pi/rag/`
 
-`/rag index <path>` creates a project store at the current cwd if no parent store is in scope. `/rag status` shows the resolved path and whether it's project-local or global.
+`/rag index <path>` creates a project store at the current cwd if no parent store is in scope. Bare `/rag` shows the resolved path and whether it's project-local or global.
 
 Legacy `~/.pi/lens/` directories are renamed to `~/.pi/rag/` on first run; legacy `index.json` files are migrated into `rag.db` and removed.
 

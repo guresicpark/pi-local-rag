@@ -8,10 +8,10 @@
  * project store; fall back to `~/.pi/rag/` as the global default. The first
  * `/rag index` in a directory with no parent store creates one at cwd.
  *
+ * /rag                  → show index stats (toggle)
  * /rag index <path>     → index + embed a file or directory
  * /rag search <query>   → hybrid search (BM25 + vector)
  * /rag find <glob>      → list indexed files matching a glob
- * /rag status           → show index stats
  * /rag rebuild          → re-embed all tracked files (forced re-embed)
  * /rag refresh          → incremental refresh (only new/changed files)
  * /rag clear            → clear index
@@ -195,14 +195,13 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ── /rag command ──
-  /** Tracks whether the /rag status widget is currently shown, so the
-   *  command toggles: show on first call, hide on the next. */
+  /** Tracks whether the /rag status widget is currently shown, so that bare
+   *  /rag toggles: show on first call, hide on the next. */
   let statusWidgetVisible = false;
   const RAG_SUBCOMMANDS: { value: string; label: string; description: string }[] = [
     { value: "index",    label: "index",    description: "Index a file or directory" },
     { value: "search",   label: "search",   description: "Search the index" },
     { value: "find",     label: "find",     description: "List indexed files matching a glob" },
-    { value: "status",   label: "status",   description: "Toggle index statistics display" },
     { value: "rebuild",  label: "rebuild",  description: "Re-embed tracked files (--force to skip hash check + wipe DB)" },
     { value: "refresh",  label: "refresh",  description: "Incremental refresh — new/changed files only" },
     { value: "clear",    label: "clear",    description: "Clear the index" },
@@ -214,7 +213,7 @@ export default function (pi: ExtensionAPI) {
   ];
 
   pi.registerCommand("rag", {
-    description: "pi-local-rag: /rag index|search|find|status|rebuild [--force]|refresh|clear|exclude|on|off|ext",
+    description: "pi-local-rag: /rag (status)|index|search|find|rebuild [--force]|refresh|clear|exclude|on|off|ext",
     getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
       const filtered = RAG_SUBCOMMANDS
         .filter((s) => s.value.startsWith(prefix))
@@ -223,7 +222,7 @@ export default function (pi: ExtensionAPI) {
     },
     handler: async (args, ctx) => {
       const parts = (args || "").trim().split(/\s+/);
-      const cmd = parts[0] || "status";
+      const cmd = parts[0] || "";
 
       // ── index ──
       if (cmd === "index") {
@@ -629,7 +628,7 @@ export default function (pi: ExtensionAPI) {
           ["/rag index <path>",       "Index a file or directory (chunks, embeds, stores)"],
           ["/rag search <query>",     "Hybrid BM25 + vector search over the index"],
           ["/rag find <glob>",        "List indexed files matching a glob (e.g. *.ts, src/*)"],
-          ["/rag status",             "Show index stats and active configuration"],
+          ["/rag",                    "Show index stats and active configuration (toggle)"],
           ["/rag rebuild [--force]",  "Re-embed tracked files; --force wipes DB and bypasses hash skip"],
           ["/rag refresh",            "Incremental refresh — only new/changed files (also fires automatically every 24h)"],
           ["/rag clear",              "Delete all indexed chunks"],
@@ -649,7 +648,13 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      // ── status (default, toggles the widget) ──
+      // ── unknown subcommand ──
+      if (cmd) {
+        ctx.ui.notify(`Unknown /rag command: ${cmd}. Try /rag help`, "error");
+        return;
+      }
+
+      // ── bare /rag (default, toggles the status widget) ──
       if (statusWidgetVisible) {
         statusWidgetVisible = false;
         ctx.ui.setWidget("rag-status", undefined);

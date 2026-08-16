@@ -19,7 +19,7 @@
  * /rag find <glob>      → list indexed files matching a glob
  * /rag rebuild          → re-embed all tracked files (forced re-embed)
  * /rag refresh          → incremental refresh (only new/changed files)
- * /rag clear            → clear index
+ * /rag clear            → clear index + reset the store to fresh defaults
  * /rag exclude <pat>    → add gitignore-style pattern (use -<pat> to remove; omit arg to list)
  * /rag on|off           → toggle auto-injection
  * /rag ext list         → list extension groups (code / text)
@@ -54,7 +54,7 @@ import {
   loadConfig, saveConfig, normalizeExt,
   resolveCodeExtensions, resolveDocExtensions, classifyFile,
 } from "./config.ts";
-import { getDbConn, closeDbConn, loadIndex, clearIndex, getIndexStats, getIndexedFiles } from "./db.ts";
+import { getDbConn, closeDbConn, loadIndex, resetStore, getIndexStats, getIndexedFiles } from "./db.ts";
 import { collectFiles, collectFromTracked, collectFromTrackedAsync, isExcludedByConfig } from "./chunking.ts";
 import { hybridSearch } from "./search.ts";
 import { indexFiles, isIndexStale } from "./indexing.ts";
@@ -73,7 +73,7 @@ export {
   resolveCodeExtensions, resolveDocExtensions, classifyFile,
 } from "./config.ts";
 export type { Chunk, IndexMeta, IndexStats } from "./db.ts";
-export { openDb, getDb, getDbConn, closeDbConn, getFreshDbConn, loadIndex, saveIndex, clearIndex, getIndexStats, initSchema, float32ToBuffer } from "./db.ts";
+export { openDb, getDb, getDbConn, closeDbConn, getFreshDbConn, loadIndex, saveIndex, clearIndex, resetStore, getIndexStats, initSchema, float32ToBuffer } from "./db.ts";
 export {
   sha256, chunkText, collectFiles, collectFilesAsync, collectFromTracked, collectFromTrackedAsync,
   isExcludedByConfig, extractText, getOcrTooling, isSparsePdfText,
@@ -253,7 +253,7 @@ export default function (pi: ExtensionAPI) {
     { value: "find",     label: "find",     description: "List indexed files matching a glob" },
     { value: "rebuild",  label: "rebuild",  description: "Re-embed tracked files (--force to skip hash check + wipe DB)" },
     { value: "refresh",  label: "refresh",  description: "Incremental refresh — new/changed files only" },
-    { value: "clear",    label: "clear",    description: "Clear the index" },
+    { value: "clear",    label: "clear",    description: "Clear the index and reset the store to defaults" },
     { value: "exclude",  label: "exclude",  description: "Manage gitignore-style exclude patterns" },
     { value: "ext",      label: "ext",      description: "Manage indexable file-extension allowlist" },
     { value: "on",       label: "on",       description: "Enable auto-injection" },
@@ -569,8 +569,8 @@ export default function (pi: ExtensionAPI) {
 
       // ── clear ──
       if (cmd === "clear") {
-        clearIndex();
-        ctx.ui.notify("Index cleared.", "info");
+        const storeDir = resetStore();
+        ctx.ui.notify(`✅ Index cleared and store reset to fresh defaults: ${storeDir}`, "info");
         return;
       }
 
@@ -661,7 +661,7 @@ export default function (pi: ExtensionAPI) {
           ["/rag",                    "Show index stats and active configuration (toggle)"],
           ["/rag rebuild [--force]",  "Re-embed tracked files; --force wipes DB and bypasses hash skip"],
           ["/rag refresh",            "Incremental refresh — only new/changed files (also fires automatically every 24h)"],
-          ["/rag clear",              "Delete all indexed chunks"],
+          ["/rag clear",              "Wipe the index and reset the store (config + DB) to fresh defaults"],
           ["/rag exclude <pattern>",  "Add a gitignore-style exclude pattern (omit to list; -<pattern> to remove)"],
           ["/rag ext list",            "Show extension groups (code → jina, text → nomic)"],
           ["/rag ext add <.ext> [code|text]", "Add an extension (group defaults by extension)"],

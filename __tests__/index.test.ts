@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from "vitest";
 import {
-  mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, realpathSync,
+  mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync, realpathSync,
 } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join, dirname, relative, basename } from "node:path";
@@ -1251,6 +1251,68 @@ describe("Storage (loadConfig/saveConfig/loadIndex/saveIndex/ensureDir)", () => 
 
     const singleton = mod.getDbConn();
     expect((singleton.prepare("SELECT COUNT(*) AS n FROM chunks_fts").get() as { n: number }).n).toBe(0);
+  });
+
+  it("resetStore wipes the store dir and regenerates fresh default config + empty rag.db (what /rag clear calls)", async () => {
+    const mod = await import("../index.ts");
+
+    // Seed: index content, a customized config, legacy + stray files.
+    const db = mod.getFreshDbConn();
+    try {
+      db.prepare(`
+        INSERT INTO chunks(id, file_path, chunk_content, line_start, line_end, chunk_hash, indexed_at, tokens)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run("reset-1", "/some/reset.ts", "hello reset", 1, 2, "cafebabe", "2026-05-15T00:00:00Z", 3);
+      db.prepare(`
+        INSERT OR REPLACE INTO files(path, hash, chunks, indexed, size, embedded)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run("/some/reset.ts", "cafebabe", 1, "2026-05-15T00:00:00Z", 11, 1);
+      db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES ('last_build', ?)").run("2026-05-15T00:00:00Z");
+      db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES ('embedding_model', ?)").run("nomic-ai/nomic-embed-text-v1.5");
+    } finally {
+      db.close();
+    }
+    mod.saveConfig({
+      ...mod.loadConfig(),
+      ragEnabled: false,
+      ragTopK: 42,
+      trackedPaths: ["/gone/path"],
+      excludePatterns: ["vendor/"],
+    });
+    writeFileSync(join(ragDir, "index.json"), "{}");
+    mkdirSync(join(ragDir, "stray-dir"));
+    writeFileSync(join(ragDir, "stray-dir", "junk.txt"), "junk");
+    writeFileSync(join(ragDir, "notes.txt"), "stray");
+
+    // Singleton holds an open connection to the seeded store — resetStore
+    // must close it before deleting the files underneath.
+    expect(mod.getIndexStats(mod.getDbConn()).totalChunks).toBe(1);
+
+    const returnedDir = mod.resetStore();
+    expect(returnedDir).toBe(ragDir);
+
+    // Store dir contains only the fresh defaults.
+    expect(existsSync(join(ragDir, "notes.txt"))).toBe(false);
+    expect(existsSync(join(ragDir, "index.json"))).toBe(false);
+    expect(existsSync(join(ragDir, "stray-dir"))).toBe(false);
+    const entries = readdirSync(ragDir).sort();
+    expect(entries).toEqual(["config.json", "rag.db"]);
+
+    // Config is back to defaults.
+    const cfg = mod.loadConfig();
+    expect(cfg.ragEnabled).toBe(true);
+    expect(cfg.ragTopK).toBe(5);
+    expect(cfg.trackedPaths).toEqual([]);
+    expect(cfg.excludePatterns).toEqual([]);
+
+    // Fresh DB is empty but schema-initialized; model metadata was wiped
+    // with the file (unlike clearIndex, which preserves it).
+    const stats = mod.getIndexStats(mod.getDbConn());
+    expect(stats.totalChunks).toBe(0);
+    expect(stats.totalFiles).toBe(0);
+    expect(stats.lastBuild).toBe("");
+    expect(stats.embeddingModel).toBe("");
+    mod.closeDbConn();
   });
 });
 

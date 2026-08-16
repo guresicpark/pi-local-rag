@@ -1,7 +1,9 @@
-import { existsSync, readFileSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
 import Database from "better-sqlite3";
 import { load as loadVec } from "sqlite-vec";
 import { getRagDir, dbFile, legacyIndexFile, ensureDir } from "./store.ts";
+import { defaultConfig, saveConfig } from "./config.ts";
 import * as repo from "./repository.ts";
 
 export interface Chunk {
@@ -175,6 +177,25 @@ export function clearIndex(db?: Database.Database) {
   const dbConn = db ?? getDbConn();
   repo.clearAllVectors(dbConn);
   repo.deleteMetadata(dbConn, repo.MetadataKey.LastBuild);
+}
+
+/** Factory-reset the active RAG store (what /rag clear calls): close the
+ *  singleton connection, delete every entry in the store directory (rag.db
+ *  + WAL/SHM sidecars, config.json, legacy index.json, anything else), then
+ *  regenerate fresh defaults — a default config.json and an empty
+ *  schema-initialized rag.db. Returns the store directory path. */
+export function resetStore(): string {
+  const dir = getRagDir();
+  closeDbConn();
+  if (existsSync(dir)) {
+    for (const entry of readdirSync(dir)) {
+      rmSync(join(dir, entry), { recursive: true, force: true });
+    }
+  }
+  ensureDir(dir);
+  saveConfig(defaultConfig());
+  RagDatabase.open(dir).close();
+  return dir;
 }
 
 export function loadIndex(): IndexMeta {

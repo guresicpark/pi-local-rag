@@ -47,7 +47,7 @@ The OCR fallback is silent when these tools aren't installed (logs one stderr hi
 | `/rag` | Show index stats, active config, tracked paths, exclude patterns, storage scope (run again to hide) |
 | `/rag rebuild [--force]` | Re-walk tracked paths and re-embed all files. `--force` wipes the DB and bypasses the hash-cache check |
 | `/rag refresh` | Incremental refresh — only new/changed files (same code path as the 24 h auto-refresh) |
-| `/rag clear` | Wipe the entire index (tracked paths are preserved) |
+| `/rag clear` | Factory-reset the store: delete every file in the active store dir (`.pi/rag/` or `~/.pi/rag/`) and regenerate fresh defaults (default `config.json` + empty `rag.db`). Tracked paths and custom config are wiped |
 | `/rag exclude <pattern>` | Add a gitignore-style exclude pattern; `/rag exclude -<pattern>` to remove; no arg to list |
 | `/rag ext list` | Show the extension groups and which model embeds each |
 | `/rag ext add <.ext> [code\|text]` | Add an extension to a group (group inferred from the extension by default) |

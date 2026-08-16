@@ -5,7 +5,7 @@ Local hybrid RAG pipeline for the [Pi coding agent](https://github.com/badlogic/
 ## Features
 
 - **Hybrid BM25 + vector search** — SQLite FTS5 for keyword scoring, [`sqlite-vec`](https://github.com/asg017/sqlite-vec) for 768-dim cosine NN, blended at retrieval time
-- **Local ONNX embeddings** — `nomic-ai/nomic-embed-text-v1.5` via Transformers.js (~111 MB quantized model, runs fully offline after first download)
+- **Dual local ONNX embeddings** — code files are embedded by `jinaai/jina-embeddings-v2-base-code` (~170 MB quantized, trained on code + docstrings); everything else (prose, Markdown, data/config, PDF/DOCX/HTML) by `nomic-ai/nomic-embed-text-v1.5` (~111 MB quantized). Vectors live in separate `sqlite-vec` tables and hybrid search queries **both** spaces, ranking by absolute cosine similarity — all fully offline after first download
 - **Many file formats** — text, source code, Markdown, JSON, YAML, plus PDF (with optional OCR fallback for scanned docs), DOCX, HTML (auto-converted to Markdown)
 - **Per-project storage** — walks up from cwd looking for `.pi/rag/`; falls back to `~/.pi/rag/` global store
 - **Tracked paths + exclude patterns** — `/rag index <path>` remembers what to keep current; gitignore-style `/rag exclude` for `dist/`, `*.log`, etc.
@@ -49,7 +49,9 @@ The OCR fallback is silent when these tools aren't installed (logs one stderr hi
 | `/rag refresh` | Incremental refresh — only new/changed files (same code path as the 24 h auto-refresh) |
 | `/rag clear` | Wipe the entire index (tracked paths are preserved) |
 | `/rag exclude <pattern>` | Add a gitignore-style exclude pattern; `/rag exclude -<pattern>` to remove; no arg to list |
-| `/rag ext list \| add <.ext> \| remove <.ext> \| reset` | Manage the indexable file-extension allowlist |
+| `/rag ext list` | Show the extension groups and which model embeds each |
+| `/rag ext add <.ext> [code\|text]` | Add an extension to a group (group inferred from the extension by default) |
+| `/rag ext remove <.ext>` \| `reset` | Remove an extension / restore defaults |
 | `/rag on` \| `off` | Toggle auto-injection |
 | `/rag help` | Show all subcommands |
 
@@ -63,27 +65,32 @@ Found 412 files to index
 Indexing  ████████████████████████  100%
 file:    src/server/handlers/payments.ts
 done:    412 embedded · 0 unchanged
-✅ Indexed 412 files (1,847 chunks) · 0 unchanged · 38.4s · tracking 1 path(s) · project store
+⏳ Loading code embedding model: jinaai/jina-embeddings-v2-base-code — first run downloads it (this can take a few minutes)
+Embedding  ████████████████████████  100%
+code  1610/1610  jina-code
+text   237/237   nomic
+✅ Indexed 412 files (1,847 chunks: 1610 code · 237 text) · 0 unchanged · 38.4s · tracking 1 path(s) · project store
 
 $ /rag
 🔍 pi-local-rag
 
   Files indexed:    412
   Chunks:           1847
-  Vectors:          1847  (100% coverage)
+  Vectors:          237 text · 1610 code  (100% coverage)
   Total tokens:     438,219
-  Embedding model:  nomic-ai/nomic-embed-text-v1.5
+  Text model:       nomic-ai/nomic-embed-text-v1.5
+  Code model:       jinaai/jina-embeddings-v2-base-code
   Last build:       2026-05-26T20:14:03.221Z
   Storage:          /Users/you/code/my-app/.pi/rag (project)
 
   RAG injection:    enabled  topK=5  threshold=0.1  alpha=0.4
 
   File types:
-    .ts    231
-    .tsx   118
-    .md     34
-    .json   18
-    .yaml    7
+    .ts    231  code
+    .tsx   118  code
+    .md     34  text
+    .json   18  text
+    .yaml    7  text
 
   Tracked paths:
     /Users/you/code/my-app
@@ -134,8 +141,8 @@ The extension registers three tools the agent can call directly:
 
 ## How It Works
 
-1. **Index** — files are chunked (~50 lines each, broken at blank lines where possible), embedded with `nomic-ai/nomic-embed-text-v1.5` (768-dim), and stored in SQLite. PDF/DOCX go through `pdf-parse`/`mammoth`; HTML is converted to Markdown via `turndown`; scanned PDFs fall back to OCR (`pdftoppm` + `tesseract`) when the system tools are installed.
-2. **Search** — FTS5 `bm25()` + `sqlite-vec` cosine NN, normalized and blended: `alpha × BM25 + (1-alpha) × cosine` (default `alpha=0.4`). Filename matches on the first query term get a 1.5× boost.
+1. **Index** — files are chunked (~50 lines each, broken at blank lines where possible), embedded by group (code extensions → `jinaai/jina-embeddings-v2-base-code`, everything else → `nomic-ai/nomic-embed-text-v1.5`; both 768-dim), and stored in SQLite. PDF/DOCX go through `pdf-parse`/`mammoth`; HTML is converted to Markdown via `turndown`; scanned PDFs fall back to OCR (`pdftoppm` + `tesseract`) when the system tools are installed.
+2. **Search** — FTS5 `bm25()` + `sqlite-vec` cosine NN over **both** vector tables (unit-normalized embeddings put both models on a shared cosine scale), blended: `alpha × BM25 + (1-alpha) × cosine` (default `alpha=0.4`). Filename matches on the first query term get a 1.5× boost.
 3. **Auto-inject** — before every agent turn, the user's prompt is searched against the index and relevant chunks are appended after the prompt as a hidden `customType: "rag"` message (KV-cache friendly — the system prompt is unchanged across turns).
 4. **Auto-refresh** — if the index is older than 24 h, the `before_agent_start` hook re-walks tracked paths and re-indexes new/changed files in the background. Throttled to one stale check per hour.
 
@@ -161,15 +168,16 @@ Auto-injection is on by default. Config lives in `<ragDir>/config.json`:
 | `ragTopK` | `5` | Max chunks to inject |
 | `ragScoreThreshold` | `0.1` | Min hybrid score to include |
 | `ragAlpha` | `0.4` | BM25/vector blend (0 = pure vector, 1 = pure BM25) |
-| `extraExtensions` | `[]` | Extra file extensions to index beyond the defaults |
-| `excludeExtensions` | `[]` | Default extensions to skip |
+| `extraExtensions` | `[]` | Extra text-group extensions to index beyond the defaults |
+| `extraCodeExtensions` | `[]` | Extra code-group extensions (embedded by the code model) |
+| `excludeExtensions` | `[]` | Default extensions to skip (applies to both groups) |
 | `trackedPaths` | `[]` | Absolute paths that `/rag rebuild`/`refresh` re-walk |
 | `excludePatterns` | `[]` | Gitignore-style patterns applied when walking tracked paths |
 
 ## Testing
 
 ```bash
-npm test                          # full suite (downloads ~111 MB model on first run)
+npm test                          # full suite (downloads ~111 MB nomic + ~170 MB jina-code on first run)
 SKIP_EMBEDDING_TESTS=1 npm test   # skip the real-ONNX semantic tests
 ```
 

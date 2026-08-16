@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import { EMBEDDING_MODEL, VECTOR_DIM } from "./constants.ts";
+import { EMBEDDING_MODEL, VECTOR_DIM, CODE_EMBEDDING_MODEL, CODE_VECTOR_DIM, DEFAULT_CODE_EXTS } from "./constants.ts";
 
 /**
  * Centralizes every raw SQL statement used across db.ts, indexing.ts,
@@ -54,6 +54,13 @@ export function initSchema(db: Database.Database) {
       embedding float[${VECTOR_DIM}]
     );
 
+    -- Code-group vectors (jina-embeddings-v2-base-code). A separate space
+    -- from chunks_vec even at equal dimension — vectors from different
+    -- models are not comparable, so each model gets its own table.
+    CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec_code USING vec0(
+      embedding float[${CODE_VECTOR_DIM}]
+    );
+
     CREATE TABLE IF NOT EXISTS files (
       path      TEXT PRIMARY KEY,
       hash      TEXT NOT NULL,
@@ -68,22 +75,55 @@ export function initSchema(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_chunks_file_path ON chunks(file_path);
   `);
 
-  // Embedding-model swap: vectors produced by a different model are
-  // incompatible (dimension/prefix mismatch), and chunks_vec keeps its
-  // original float[N] definition from when the store was first created.
-  // Drop the stale vec table + indexed content; trackedPaths live in
-  // config.json and survive, so `/rag rebuild` restores the index.
+  // Embedding-model swaps: vectors produced by a different model are
+  // incompatible (different spaces even at equal dimension), and vec0 tables
+  // keep their original float[N] definition from when the store was created.
+  //
+  // - text model changed → drop chunks_vec + wipe all content (legacy
+  //   behavior; trackedPaths live in config.json and survive).
+  // - code model added/changed → drop chunks_vec_code and delete ONLY
+  //   code-classified files' chunks; prose chunks keep their nomic vectors,
+  //   so upgrading to the dual-model scheme doesn't re-embed the docs.
+  // `/rag rebuild` restores whatever was cleared.
   const storedModel = getMetadata(db, MetadataKey.EmbeddingModel);
   if (storedModel && storedModel !== EMBEDDING_MODEL) {
-    db.exec("DROP TABLE IF EXISTS chunks_vec; DELETE FROM chunks; DELETE FROM files;");
+    db.exec("DROP TABLE IF EXISTS chunks_vec; DELETE FROM chunks_vec_code; DELETE FROM chunks; DELETE FROM files;");
     db.exec("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')");
     db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
       embedding float[${VECTOR_DIM}]
     );`);
     deleteMetadata(db, MetadataKey.EmbeddingModel);
     process.stderr.write(
-      `[rag] embedding model changed (${storedModel} → ${EMBEDDING_MODEL}); index cleared — run /rag rebuild to re-index\n`,
+      `[rag] text embedding model changed (${storedModel} → ${EMBEDDING_MODEL}); index cleared — run /rag rebuild to re-index\n`,
     );
+  }
+
+  // Classification here uses the DEFAULT code extensions: stores created
+  // before the dual-model split only ever contained default-ext files, so
+  // user-configured extras can't appear in them. The wipe only fires on a
+  // genuine pre-dual-model index — text-model metadata present (every
+  // indexFiles run records it) but code-model metadata absent/changed.
+  const storedCodeModel = getMetadata(db, MetadataKey.EmbeddingCodeModel);
+  if (storedCodeModel !== CODE_EMBEDDING_MODEL) {
+    if (storedModel && countChunksTotal(db) > 0) {
+      const codeChunks = DEFAULT_CODE_EXTS.map(e => `file_path LIKE '%${e}'`).join(" OR ");
+      const codePaths = DEFAULT_CODE_EXTS.map(e => `path LIKE '%${e}'`).join(" OR ");
+      db.exec("DROP TABLE IF EXISTS chunks_vec_code;");
+      db.exec(`
+        DELETE FROM chunks_vec WHERE rowid IN (SELECT rowid FROM chunks WHERE ${codeChunks});
+        DELETE FROM chunks WHERE ${codeChunks};
+        DELETE FROM files WHERE ${codePaths};
+      `);
+      db.exec("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')");
+      process.stderr.write(
+        `[rag] code embedding model ${storedCodeModel ? `changed (${storedCodeModel} → ${CODE_EMBEDDING_MODEL})` : `set (${CODE_EMBEDDING_MODEL})`}; ` +
+        `code files cleared — run /rag rebuild to re-embed them with the code model\n`,
+      );
+    }
+    db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec_code USING vec0(
+      embedding float[${CODE_VECTOR_DIM}]
+    );`);
+    setMetadata(db, MetadataKey.EmbeddingCodeModel, CODE_EMBEDDING_MODEL);
   }
 }
 
@@ -193,8 +233,33 @@ export function getEmbeddedCount(db: Database.Database): number {
   return row.embeddedCount;
 }
 
+// ─── Code vectors (chunks_vec_code / jina) ───────────────────────────────
+
+export function insertCodeVector(db: Database.Database, rowid: number, vector: number[]) {
+  db.prepare("INSERT INTO chunks_vec_code(rowid, embedding) VALUES (CAST(? AS INTEGER), ?)")
+    .run(rowid, float32ToBuffer(vector));
+}
+
+export function deleteCodeVectorsForFile(db: Database.Database, filePath: string) {
+  db.prepare("DELETE FROM chunks_vec_code WHERE rowid IN (SELECT rowid FROM chunks WHERE file_path = ?)").run(filePath);
+}
+
+export function searchCodeVectors(db: Database.Database, queryVec: number[], limit: number): VecMatch[] {
+  return db.prepare(`
+    SELECT rowid, distance
+    FROM chunks_vec_code
+    WHERE embedding MATCH ?
+    LIMIT ?
+  `).bind(float32ToBuffer(queryVec), limit).all() as VecMatch[];
+}
+
+export function getCodeEmbeddedCount(db: Database.Database): number {
+  const row = db.prepare("SELECT COUNT(*) as embeddedCount FROM chunks_vec_code").get() as { embeddedCount: number };
+  return row.embeddedCount;
+}
+
 export function clearAllVectors(db: Database.Database) {
-  db.exec("DELETE FROM chunks_vec; DELETE FROM chunks; DELETE FROM files;");
+  db.exec("DELETE FROM chunks_vec; DELETE FROM chunks_vec_code; DELETE FROM chunks; DELETE FROM files;");
   db.exec("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')");
 }
 
@@ -280,6 +345,7 @@ export function countFiles(db: Database.Database): number {
 export const MetadataKey = {
   LastBuild: "last_build",
   EmbeddingModel: "embedding_model",
+  EmbeddingCodeModel: "embedding_model_code",
 } as const;
 
 export type MetadataKey = typeof MetadataKey[keyof typeof MetadataKey];

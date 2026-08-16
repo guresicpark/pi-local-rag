@@ -34,9 +34,13 @@ export interface IndexStats {
   totalChunks: number;
   totalFiles: number;
   totalTokens: number;
+  /** Chunks with text-model (nomic) vectors. */
   embeddedCount: number;
+  /** Chunks with code-model (jina) vectors. */
+  embeddedCodeCount: number;
   lastBuild: string;
   embeddingModel: string;
+  codeEmbeddingModel: string;
 }
 
 export class RagDatabase {
@@ -152,8 +156,10 @@ export function getIndexStats(db?: Database.Database): IndexStats {
     totalFiles: repo.countFiles(dbConn),
     totalTokens: totalTokens,
     embeddedCount: repo.getEmbeddedCount(dbConn),
+    embeddedCodeCount: repo.getCodeEmbeddedCount(dbConn),
     lastBuild: repo.getMetadata(dbConn, repo.MetadataKey.LastBuild) ?? "",
     embeddingModel: repo.getMetadata(dbConn, repo.MetadataKey.EmbeddingModel) ?? "",
+    codeEmbeddingModel: repo.getMetadata(dbConn, repo.MetadataKey.EmbeddingCodeModel) ?? "",
   };
 }
 

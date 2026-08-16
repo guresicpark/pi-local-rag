@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { embed } from "./embed.ts";
+import { embedQueryFor } from "./embed.ts";
 import { getDbConn } from "./db.ts";
 import { Chunk } from "./db.ts";
 import * as repo from "./repository.ts";
@@ -54,13 +54,26 @@ export async function hybridSearch(
   const ftsLimit = Math.max(limit * 20, 200);
   const ftsResults = repo.searchFts(database, ftsQuery, ftsLimit);
 
-  // Vector via sqlite-vec
-  const queryVec = await embed(query);
+  // Vector via sqlite-vec — two independent spaces: prose chunks live in
+  // chunks_vec (nomic), code chunks in chunks_vec_code (jina). Each model's
+  // query is only built when its table actually has vectors (avoids loading
+  // a model the store can't use). Distances are normalized per-space before
+  // merging, since raw scores across different embedding spaces are
+  // meaningless.
   const vecLimit = Math.max(limit * 10, 100);
-  const vecResults = repo.searchVectors(database, queryVec, vecLimit);
+  const [textVecResults, codeVecResults] = await Promise.all([
+    (async () =>
+      repo.getEmbeddedCount(database)
+        ? repo.searchVectors(database, await embedQueryFor("text", query), vecLimit)
+        : [])(),
+    (async () =>
+      repo.getCodeEmbeddedCount(database)
+        ? repo.searchCodeVectors(database, await embedQueryFor("code", query), vecLimit)
+        : [])(),
+  ]);
 
   const ftsRowIds = new Set(ftsResults.map(r => r.rowid));
-  const vecRowIds = new Set(vecResults.map(r => r.rowid));
+  const vecRowIds = new Set([...textVecResults, ...codeVecResults].map(r => r.rowid));
   const allRowIds: Set<number> = new Set([...ftsRowIds, ...vecRowIds]);
 
   if (allRowIds.size === 0) return [];
@@ -72,8 +85,6 @@ export async function hybridSearch(
 
   const bm25Scores = ftsResults.map(r => r.bm25_score);
   const hasBm25 = bm25Scores.length > 0;
-  const distances = vecResults.map(r => r.distance);
-  const hasVectors = distances.length > 0;
 
   // Normalize BM25
   const bm25NormMap = new Map<number, number>();
@@ -92,27 +103,15 @@ export async function hybridSearch(
     }
   }
 
-  // Normalize distances → cosine → min-max
+  // Both models produce unit-normalized embeddings, so raw cosine similarity
+  // is on a shared absolute scale across the two spaces — no per-space
+  // min-max (that would pin the top chunk of each space at 1.0 and create
+  // structural cross-space ties, e.g. a lone prose chunk always tying the
+  // best code chunk). Clamped at 0 to keep hybrid scores non-negative.
   const vecNormMap = new Map<number, number>();
-  if (hasVectors) {
-    for (const r of vecResults) {
-      vecNormMap.set(r.rowid, l2ToCosine(r.distance));
-    }
-    const cosines = Array.from(vecNormMap.values());
-    const cosMax = Math.max(...cosines);
-    const cosMin = Math.min(...cosines);
-    const cosRange = cosMax - cosMin;
-    if (cosRange > 0) {
-      const normalized = new Map<number, number>();
-      for (const [rowid, cos] of vecNormMap) {
-        normalized.set(rowid, (cos - cosMin) / cosRange);
-      }
-      vecNormMap.clear();
-      for (const [k, v] of normalized) vecNormMap.set(k, v);
-    } else {
-      for (const k of vecNormMap.keys()) vecNormMap.set(k, 1);
-    }
-  }
+  for (const r of textVecResults) vecNormMap.set(r.rowid, Math.max(0, l2ToCosine(r.distance)));
+  for (const r of codeVecResults) vecNormMap.set(r.rowid, Math.max(0, l2ToCosine(r.distance)));
+  const hasVectors = vecNormMap.size > 0;
 
   // Build scored results
   const terms = query.toLowerCase().split(/\s+/).filter(t => t.length > 1);

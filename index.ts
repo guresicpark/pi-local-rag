@@ -1,8 +1,13 @@
 /**
- * pi-local-rag — Hybrid RAG Pipeline (BM25 + Vector + Auto-injection)
+ * pi-local-rag — Hybrid RAG Pipeline (BM25 + dual-model vectors + Auto-injection)
  *
  * Index local files → chunk → embed → store → retrieve → inject into LLM context.
  * Uses Transformers.js (ONNX) for local embeddings — zero cloud dependency.
+ *
+ * Two embedding models: code files go through jina-embeddings-v2-base-code,
+ * everything else (prose, markup, data/config, PDF/DOCX) through
+ * nomic-embed-text-v1.5. Their vectors live in separate sqlite-vec tables
+ * and hybrid search queries both spaces, merging per-space-normalized scores.
  *
  * Storage is per-cwd: walk up from the working directory looking for a `.pi/rag/`
  * project store; fall back to `~/.pi/rag/` as the global default. The first
@@ -17,8 +22,8 @@
  * /rag clear            → clear index
  * /rag exclude <pat>    → add gitignore-style pattern (use -<pat> to remove; omit arg to list)
  * /rag on|off           → toggle auto-injection
- * /rag ext list         → list active file extensions
- * /rag ext add <.ext>   → add an extra extension (e.g. .cs, .tex)
+ * /rag ext list         → list extension groups (code / text)
+ * /rag ext add <.ext> [code|text] → add an extra extension to a group
  * /rag ext remove <.ext>→ remove an extension from the active set
  * /rag ext reset        → restore default extensions
  * /rag help             → show all /rag commands
@@ -26,14 +31,13 @@
  * Tools: rag_index, rag_query, rag_status
  *
  * Implementation is split across:
- *   constants.ts     — shared constants, file ext sets, size limits
+ *   constants.ts     — shared constants, dual model ids, ext groups, size limits
  *   store.ts         — RAG_DIR / LEGACY_DIR / file paths / ensureDir + legacy migration
- *   config.ts        — RagConfig type, loadConfig / saveConfig, ext helpers
- *   index-store.ts   — Chunk / IndexMeta types, loadIndex / saveIndex (JSON)
+ *   config.ts        — RagConfig type, loadConfig / saveConfig, ext-group helpers
  *   chunking.ts      — sha256, chunkText, collectFiles, extractText (txt/pdf/docx/html)
- *   embed.ts         — getEmbedder, embed, embedBatch (ONNX via @huggingface/transformers)
- *   search.ts        — cosineSimilarity, normalize, hybridSearch
- *   indexing.ts      — indexFiles (parallel Phase 1 read, sequential Phase 2 embed)
+ *   embed.ts         — dual ONNX pipelines (nomic + jina-code), embed, embedBatchFor
+ *   search.ts        — cosineSimilarity, normalize, hybridSearch (both vector spaces)
+ *   indexing.ts      — indexFiles (parallel Phase 1 read, per-model Phase 2 embed)
  *   index.ts         — extension entry point (this file) + re-exports
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -44,9 +48,12 @@ import { existsSync } from "node:fs";
 import { resolve, extname, basename, relative, isAbsolute, sep } from "node:path";
 import ignore from "ignore";
 
-import { RST, B, D, GREEN, CYAN } from "./constants.ts";
+import { RST, B, D, GREEN, CYAN, type EmbedGroup, CODE_EMBEDDING_MODEL, DEFAULT_CODE_EXTS, EMBEDDING_MODEL } from "./constants.ts";
 import { getRagDir, GLOBAL_RAG_DIR, dbFile } from "./store.ts";
-import { loadConfig, saveConfig, normalizeExt, resolveExtensions } from "./config.ts";
+import {
+  loadConfig, saveConfig, normalizeExt,
+  resolveCodeExtensions, resolveDocExtensions, classifyFile,
+} from "./config.ts";
 import { getDbConn, closeDbConn, loadIndex, clearIndex, getIndexStats, getIndexedFiles } from "./db.ts";
 import { collectFiles, collectFromTracked, collectFromTrackedAsync, isExcludedByConfig } from "./chunking.ts";
 import { hybridSearch } from "./search.ts";
@@ -54,23 +61,65 @@ import { indexFiles, isIndexStale } from "./indexing.ts";
 
 // Re-export the public surface so existing consumers of `pi-local-rag` keep
 // working (tests, downstream code that imports from the package root).
-export { DEFAULT_TEXT_EXTS } from "./constants.ts";
+export {
+  DEFAULT_TEXT_EXTS, DEFAULT_CODE_EXTS, DEFAULT_DOC_EXTS, BINARY_DOC_EXTS,
+  EMBEDDING_MODEL, CODE_EMBEDDING_MODEL, MAX_LINE_CHARS, MAX_CHUNK_CHARS,
+} from "./constants.ts";
+export type { EmbedGroup } from "./constants.ts";
 export { getRagDir, GLOBAL_RAG_DIR, LEGACY_DIR } from "./store.ts";
 export type { RagConfig } from "./config.ts";
-export { loadConfig, saveConfig, defaultConfig, normalizeExt, resolveExtensions } from "./config.ts";
+export {
+  loadConfig, saveConfig, defaultConfig, normalizeExt, resolveExtensions,
+  resolveCodeExtensions, resolveDocExtensions, classifyFile,
+} from "./config.ts";
 export type { Chunk, IndexMeta, IndexStats } from "./db.ts";
 export { openDb, getDb, getDbConn, closeDbConn, getFreshDbConn, loadIndex, saveIndex, clearIndex, getIndexStats, initSchema, float32ToBuffer } from "./db.ts";
 export {
   sha256, chunkText, collectFiles, collectFilesAsync, collectFromTracked, collectFromTrackedAsync,
   isExcludedByConfig, extractText, getOcrTooling, isSparsePdfText,
 } from "./chunking.ts";
-export { embed, embedBatch, resolveModelCacheDir } from "./embed.ts";
+export { embed, embedBatch, embedQueryFor, embedBatchFor, EMBED_MODELS, resolveModelCacheDir } from "./embed.ts";
 export type { ScoredChunk } from "./search.ts";
 export { cosineSimilarity, normalize, hybridSearch } from "./search.ts";
 export { isIndexStale, indexFiles } from "./indexing.ts";
 export type { ProgressCallbacks } from "./indexing.ts";
 
 // ─── Extension ────────────────────────────────────────────────────────────────
+
+/** Shared progress-bar renderer (24-cell block bar, CYAN filled / dim empty). */
+function progressBar(n: number, total: number, width = 24): string {
+  const filled = Math.round((n / total) * width);
+  return CYAN + "█".repeat(filled) + D + "░".repeat(width - filled) + RST;
+}
+
+/**
+ * Shared embed-progress UI for /rag index|rebuild|refresh: renders one line
+ * per embedding model (code → jina, text → nomic) plus a combined bar, and
+ * notifies when a model is about to be downloaded (a cold cache can stall
+ * for minutes with no other visual feedback).
+ */
+function makeEmbedProgress(ctx: { ui: { setStatus: (k: string, v: string | undefined) => void; setWidget: (k: string, v: string[] | undefined) => void; notify: (m: string, t?: "info" | "error" | "warning") => void } }, verb: string) {
+  const state: Partial<Record<EmbedGroup, { done: number; total: number }>> = {};
+  return {
+    onEmbed(done: number, total: number, group: EmbedGroup) {
+      state[group] = { done, total };
+      const groups = (Object.keys(state) as EmbedGroup[]).sort();
+      const doneAll = groups.reduce((s, g) => s + state[g]!.done, 0);
+      const totalAll = groups.reduce((s, g) => s + state[g]!.total, 0);
+      const pct = totalAll ? Math.round((doneAll / totalAll) * 100) : 0;
+      const bar = progressBar(doneAll, totalAll);
+      ctx.ui.setStatus("rag", `■ ${verb} ${pct}% │ ${doneAll}/${totalAll} chunks`);
+      ctx.ui.setWidget("rag", [
+        `${B}${CYAN}${verb}${RST}  ${bar}  ${GREEN}${pct}%${RST}`,
+        ...groups.map(g =>
+          `${D}${g.padEnd(5)} ${RST}${state[g]!.done}/${state[g]!.total}${D}  ${g === "code" ? "jina-code" : "nomic"}${RST}`),
+      ]);
+    },
+    onModelLoad(group: EmbedGroup, model: string) {
+      ctx.ui.notify(`⏳ Loading ${group} embedding model: ${model} — first run downloads it (this can take a few minutes)`, "info");
+    },
+  };
+}
 
 export default function (pi: ExtensionAPI) {
   // Render the auto-injected "rag" message as a single summary line in the TUI.
@@ -188,7 +237,7 @@ export default function (pi: ExtensionAPI) {
         config.ragEnabled = true;
         saveConfig(config);
       }
-      ctx.ui.notify("Chunks found for current sesseion - RAG auto-injection enabled", "info");
+      ctx.ui.notify("RAG auto-injection enabled", "info");
     } finally {
       closeDbConn();
     }
@@ -242,11 +291,6 @@ export default function (pi: ExtensionAPI) {
         const total = files.length;
         ctx.ui.notify(`Found ${total} files to index`, "info");
 
-        function progressBar(n: number, total: number, width = 24): string {
-          const filled = Math.round((n / total) * width);
-          return CYAN + "█".repeat(filled) + D + "░".repeat(width - filled) + RST;
-        }
-
         const result = await indexFiles(files, {
           onFile(current, total, filename, skipped) {
             const pct = Math.round((current / total) * 100);
@@ -258,15 +302,7 @@ export default function (pi: ExtensionAPI) {
               `${D}done:    ${RST}${GREEN}${current - skipped} chunked${RST}  ${D}${skipped} unchanged${RST}`,
             ]);
           },
-          onEmbed(done, total) {
-            const pct = Math.round((done / total) * 100);
-            const bar = progressBar(done, total);
-            ctx.ui.setStatus("rag", `■ Embedding ${pct}% │ ${done}/${total} chunks`);
-            ctx.ui.setWidget("rag", [
-              `${B}${CYAN}Embedding${RST}  ${bar}  ${GREEN}${pct}%${RST}`,
-              `${D}chunks:  ${RST}${done}/${total}`,
-            ]);
-          },
+          ...makeEmbedProgress(ctx, "Embedding"),
           onChunk(ci, total, filename) {
             ctx.ui.setStatus("rag", `■ Embedding ${filename} — chunk ${ci}/${total}`);
           },
@@ -281,7 +317,7 @@ export default function (pi: ExtensionAPI) {
         const secs = (result.durationMs / 1000).toFixed(1);
         const ragDir = getRagDir();
         const scope = ragDir === GLOBAL_RAG_DIR() ? "global" : "project";
-        ctx.ui.notify(`✅ Indexed ${result.indexed} files (${result.chunks} chunks) · ${result.skipped} unchanged · ${secs}s · tracking ${config.trackedPaths.length} path(s) · ${scope} store`, "info");
+        ctx.ui.notify(`✅ Indexed ${result.indexed} files (${result.chunks} chunks: ${result.chunksByGroup.code} code · ${result.chunksByGroup.text} text) · ${result.skipped} unchanged · ${secs}s · tracking ${config.trackedPaths.length} path(s) · ${scope} store`, "info");
         return;
       }
 
@@ -295,7 +331,8 @@ export default function (pi: ExtensionAPI) {
 
         const th = ctx.ui.theme;
         const database = getDbConn();
-        const hasVectors = getIndexStats(database).embeddedCount > 0;
+        const stats = getIndexStats(database);
+        const hasVectors = stats.embeddedCount > 0 || stats.embeddedCodeCount > 0;
         const lines: string[] = [
           th.bold(th.fg("accent", "🔍 ") + `${results.length} results for "${query}"`) +
             "  " + th.fg("dim", hasVectors ? "hybrid BM25+vector" : "BM25 only"),
@@ -360,6 +397,7 @@ export default function (pi: ExtensionAPI) {
           const droppedFiles = [...indexedFileSet].filter(f => !targetSet.has(f));
           for (const f of droppedFiles) {
             database.prepare("DELETE FROM chunks_vec WHERE rowid IN (SELECT rowid FROM chunks WHERE file_path = ?)").run(f);
+            database.prepare("DELETE FROM chunks_vec_code WHERE rowid IN (SELECT rowid FROM chunks WHERE file_path = ?)").run(f);
             database.prepare("DELETE FROM chunks WHERE file_path = ?").run(f);
             database.prepare("DELETE FROM files WHERE path = ?").run(f);
           }
@@ -367,7 +405,7 @@ export default function (pi: ExtensionAPI) {
             // --force: wipe everything and rebuild the FTS index. indexFiles
             // will then insert fresh rows for every targetFile, bypassing the
             // skip-on-equal-hash check.
-            database.exec("DELETE FROM chunks_vec; DELETE FROM chunks; DELETE FROM files;");
+            database.exec("DELETE FROM chunks_vec; DELETE FROM chunks_vec_code; DELETE FROM chunks; DELETE FROM files;");
             database.exec("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')");
           } else {
             for (const f of targetFiles) {
@@ -384,11 +422,6 @@ export default function (pi: ExtensionAPI) {
           // indexFiles starts hammering the event loop.
           await new Promise<void>(r => setTimeout(r, 0));
 
-          function progressBar(n: number, total: number, width = 24): string {
-            const filled = Math.round((n / total) * width);
-            return CYAN + "█".repeat(filled) + D + "░".repeat(width - filled) + RST;
-          }
-
           const result = await indexFiles(targetFiles, {
             onFile(current, total, filename, skipped) {
               const pct = Math.round((current / total) * 100);
@@ -400,15 +433,7 @@ export default function (pi: ExtensionAPI) {
                 `${D}done:    ${RST}${GREEN}${current - skipped} re-embedded${RST}  ${D}${skipped} unchanged${RST}`,
               ]);
             },
-            onEmbed(done, total) {
-              const pct = Math.round((done / total) * 100);
-              const bar = progressBar(done, total);
-              ctx.ui.setStatus("rag", `■ Embedding ${pct}% │ ${done}/${total} chunks`);
-              ctx.ui.setWidget("rag", [
-                `${B}${CYAN}Embedding${RST}  ${bar}  ${GREEN}${pct}%${RST}`,
-                `${D}chunks:  ${RST}${done}/${total}`,
-              ]);
-            },
+            ...makeEmbedProgress(ctx, "Embedding"),
             onChunk(ci, total, filename) {
               ctx.ui.setStatus("rag", `■ Embedding ${filename} — chunk ${ci}/${total}`);
             },
@@ -421,7 +446,7 @@ export default function (pi: ExtensionAPI) {
           ctx.ui.setWidget("rag", undefined);
 
           const secs = (result.durationMs / 1000).toFixed(1);
-          ctx.ui.notify(`✅ Rebuilt: ${result.indexed} re-indexed · ${result.skipped} unchanged · ${droppedFiles.length} deleted · ${result.chunks} chunks · ${secs}s`, "info");
+          ctx.ui.notify(`✅ Rebuilt: ${result.indexed} re-indexed · ${result.skipped} unchanged · ${droppedFiles.length} deleted · ${result.chunks} chunks (${result.chunksByGroup.code} code · ${result.chunksByGroup.text} text) · ${secs}s`, "info");
         } catch (err) {
           ctx.ui.notify(`Rebuild failed: ${(err as Error).message}`, "error");
         }
@@ -442,11 +467,6 @@ export default function (pi: ExtensionAPI) {
 
         ctx.ui.notify(`Refreshing ${files.length} files...`, "info");
 
-        function progressBar(n: number, total: number, width = 24): string {
-          const filled = Math.round((n / total) * width);
-          return CYAN + "█".repeat(filled) + D + "░".repeat(width - filled) + RST;
-        }
-
         const result = await indexFiles(files, {
           onFile(current, total, filename, skipped) {
             const pct = Math.round((current / total) * 100);
@@ -458,15 +478,7 @@ export default function (pi: ExtensionAPI) {
               `${D}done:    ${RST}${GREEN}${current - skipped} new/changed${RST}  ${D}${skipped} unchanged${RST}`,
             ]);
           },
-          onEmbed(done, total) {
-            const pct = Math.round((done / total) * 100);
-            const bar = progressBar(done, total);
-            ctx.ui.setStatus("rag", `■ Embedding ${pct}% │ ${done}/${total} chunks`);
-            ctx.ui.setWidget("rag", [
-              `${B}${CYAN}Embedding${RST}  ${bar}  ${GREEN}${pct}%${RST}`,
-              `${D}chunks:  ${RST}${done}/${total}`,
-            ]);
-          },
+          ...makeEmbedProgress(ctx, "Embedding"),
           onChunk(ci, total, filename) {
             ctx.ui.setStatus("rag", `■ Embedding ${filename} — chunk ${ci}/${total}`);
           },
@@ -479,7 +491,7 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.setWidget("rag", undefined);
 
         const secs = (result.durationMs / 1000).toFixed(1);
-        ctx.ui.notify(`✅ Refreshed ${result.indexed} new/changed · ${result.skipped} unchanged · ${result.chunks} chunks · ${secs}s`, "info");
+        ctx.ui.notify(`✅ Refreshed ${result.indexed} new/changed · ${result.skipped} unchanged · ${result.chunks} chunks (${result.chunksByGroup.code} code · ${result.chunksByGroup.text} text) · ${secs}s`, "info");
         return;
       }
 
@@ -490,35 +502,52 @@ export default function (pi: ExtensionAPI) {
 
         if (sub === "list") {
           const th = ctx.ui.theme;
-          const active = Array.from(resolveExtensions(config)).sort();
+          const code = Array.from(resolveCodeExtensions(config)).sort();
+          const docs = Array.from(resolveDocExtensions(config)).sort();
           const lines: string[] = [
-            th.bold("Active file extensions") + "  " + th.fg("dim", `(${active.length})`),
-            th.fg("muted", "  " + active.join(" ")),
+            th.bold("Active file extensions") + "  " + th.fg("dim", `(${code.length} code · ${docs.length} text)`),
+            th.fg("dim", "  code ") + th.fg("muted", code.join(" ")),
+            th.fg("dim", "        ") + th.fg("dim", `→ ${CODE_EMBEDDING_MODEL}`),
+            th.fg("dim", "  text ") + th.fg("muted", docs.join(" ")),
+            th.fg("dim", "        ") + th.fg("dim", `→ ${EMBEDDING_MODEL}  (+ .pdf .docx)`),
           ];
-          if (config.extraExtensions.length)
-            lines.push("  " + th.fg("dim", "extra:   ") + th.fg("success", config.extraExtensions.join(" ")));
+          if (config.extraExtensions.length || config.extraCodeExtensions.length)
+            lines.push("  " + th.fg("dim", "extra:   ") + th.fg("success", [...config.extraExtensions, ...config.extraCodeExtensions].join(" ")));
           if (config.excludeExtensions.length)
             lines.push("  " + th.fg("dim", "excluded:") + " " + th.fg("warning", config.excludeExtensions.join(" ")));
-          lines.push("", th.fg("dim", "Edit via /rag ext add <.ext> / remove <.ext> / reset"));
+          lines.push("", th.fg("dim", "Edit via /rag ext add <.ext> [code|text] / remove <.ext> / reset"));
           ctx.ui.setWidget("rag-ext", lines);
           return;
         }
 
         if (sub === "add") {
           const ext = normalizeExt(parts[2] || "");
-          if (!ext) { ctx.ui.notify("Usage: /rag ext add <.ext>", "warning"); return; }
+          if (!ext) { ctx.ui.notify("Usage: /rag ext add <.ext> [code|text]", "warning"); return; }
+          const groupArg = (parts[3] || "").toLowerCase();
+          const group: EmbedGroup =
+            groupArg === "code" || groupArg === "text" ? groupArg
+            : DEFAULT_CODE_EXTS.includes(ext) ? "code"
+            : "text";
           config.excludeExtensions = config.excludeExtensions.filter(e => normalizeExt(e) !== ext);
-          if (!config.extraExtensions.map(normalizeExt).includes(ext)) config.extraExtensions.push(ext);
+          if (group === "code") {
+            config.extraExtensions = config.extraExtensions.filter(e => normalizeExt(e) !== ext);
+            if (!config.extraCodeExtensions.map(normalizeExt).includes(ext)) config.extraCodeExtensions.push(ext);
+          } else {
+            config.extraCodeExtensions = config.extraCodeExtensions.filter(e => normalizeExt(e) !== ext);
+            if (!config.extraExtensions.map(normalizeExt).includes(ext)) config.extraExtensions.push(ext);
+          }
           saveConfig(config);
-          ctx.ui.notify(`Added ${ext} to indexable extensions. Run /rag index <path> to pick up matching files.`, "info");
+          const model = group === "code" ? CODE_EMBEDDING_MODEL : EMBEDDING_MODEL;
+          ctx.ui.notify(`Added ${ext} to the ${group} group (embedded by ${model}). Run /rag index <path> to pick up matching files.`, "info");
           return;
         }
 
         if (sub === "remove" || sub === "rm") {
           const ext = normalizeExt(parts[2] || "");
           if (!ext) { ctx.ui.notify("Usage: /rag ext remove <.ext>", "warning"); return; }
-          const wasExtra = config.extraExtensions.map(normalizeExt).includes(ext);
+          const wasExtra = [...config.extraExtensions, ...config.extraCodeExtensions].map(normalizeExt).includes(ext);
           config.extraExtensions = config.extraExtensions.filter(e => normalizeExt(e) !== ext);
+          config.extraCodeExtensions = config.extraCodeExtensions.filter(e => normalizeExt(e) !== ext);
           if (!wasExtra && !config.excludeExtensions.map(normalizeExt).includes(ext)) config.excludeExtensions.push(ext);
           saveConfig(config);
           ctx.ui.notify(`Removed ${ext} from indexable extensions.`, "info");
@@ -527,13 +556,14 @@ export default function (pi: ExtensionAPI) {
 
         if (sub === "reset") {
           config.extraExtensions = [];
+          config.extraCodeExtensions = [];
           config.excludeExtensions = [];
           saveConfig(config);
-          ctx.ui.notify("Extension list reset to defaults.", "info");
+          ctx.ui.notify("Extension lists reset to defaults.", "info");
           return;
         }
 
-        ctx.ui.notify("Usage: /rag ext list|add <.ext>|remove <.ext>|reset", "warning");
+        ctx.ui.notify("Usage: /rag ext list|add <.ext> [code|text]|remove <.ext>|reset", "warning");
         return;
       }
 
@@ -633,7 +663,10 @@ export default function (pi: ExtensionAPI) {
           ["/rag refresh",            "Incremental refresh — only new/changed files (also fires automatically every 24h)"],
           ["/rag clear",              "Delete all indexed chunks"],
           ["/rag exclude <pattern>",  "Add a gitignore-style exclude pattern (omit to list; -<pattern> to remove)"],
-          ["/rag ext list|add|remove|reset", "Manage the indexable file-extension allowlist"],
+          ["/rag ext list",            "Show extension groups (code → jina, text → nomic)"],
+          ["/rag ext add <.ext> [code|text]", "Add an extension (group defaults by extension)"],
+          ["/rag ext remove <.ext>",   "Remove an extension from the active set"],
+          ["/rag ext reset",           "Restore default extension groups"],
           ["/rag on",                 "Enable automatic RAG injection before each agent turn"],
           ["/rag off",                "Disable automatic RAG injection"],
           ["/rag help",               "Show this help"],
@@ -665,8 +698,8 @@ export default function (pi: ExtensionAPI) {
       const stats = getIndexStats(getDbConn());
       const fileCount = stats.totalFiles;
       const totalTokens = stats.totalTokens;
-      const embeddedCount = stats.embeddedCount;
-      const vectorCoverage = stats.totalChunks ? Math.round(embeddedCount / stats.totalChunks * 100) : 0;
+      const totalVectors = stats.embeddedCount + stats.embeddedCodeCount;
+      const vectorCoverage = stats.totalChunks ? Math.round(totalVectors / stats.totalChunks * 100) : 0;
 
       const th = ctx.ui.theme;
       const label = (k: string) => th.fg("dim", k.padEnd(18));
@@ -678,9 +711,10 @@ export default function (pi: ExtensionAPI) {
         "",
         "  " + label("Files indexed:")  + val(fileCount),
         "  " + label("Chunks:")         + val(stats.totalChunks),
-        "  " + label("Vectors:")        + val(embeddedCount) + "  " + th.fg("dim", `(${vectorCoverage}% coverage)`),
+        "  " + label("Vectors:")        + val(`${stats.embeddedCount} text · ${stats.embeddedCodeCount} code`) + "  " + th.fg("dim", `(${vectorCoverage}% coverage)`),
         "  " + label("Total tokens:")   + val(totalTokens.toLocaleString()),
-        "  " + label("Embedding model:") + th.fg("dim", stats.embeddingModel || "none"),
+        "  " + label("Text model:")     + th.fg("dim", stats.embeddingModel || "none"),
+        "  " + label("Code model:")     + th.fg("dim", stats.codeEmbeddingModel || "none"),
         "  " + label("Last build:")     + (stats.lastBuild || th.fg("dim", "never")),
         "  " + label("Storage:")        + th.fg("dim", `${ragDir} (${scope})`),
         "",
@@ -694,7 +728,8 @@ export default function (pi: ExtensionAPI) {
         const byExt: Record<string, number> = {};
         for (const f of Object.keys(index.files)) byExt[extname(f)] = (byExt[extname(f)] || 0) + 1;
         for (const [ext, count] of Object.entries(byExt).sort((a, b) => b[1] - a[1]).slice(0, 8)) {
-          lines.push("    " + th.fg("muted", ext) + "  " + th.fg("dim", String(count)));
+          const group = classifyFile(ext) === "code" ? th.fg("accent", " code") : th.fg("muted", " text");
+          lines.push("    " + th.fg("muted", ext) + "  " + th.fg("dim", String(count)) + group);
         }
       }
 
@@ -777,13 +812,19 @@ export default function (pi: ExtensionAPI) {
     execute: async (_toolCallId) => {
       const config = loadConfig();
       const stats = getIndexStats(getDbConn());
-      const embeddedCount = stats.embeddedCount;
+      const totalVectors = stats.embeddedCount + stats.embeddedCodeCount;
       const text = JSON.stringify({
         files: stats.totalFiles,
         chunks: stats.totalChunks,
-        vectorsEmbedded: embeddedCount,
-        vectorCoverage: stats.totalChunks ? `${Math.round(embeddedCount / stats.totalChunks * 100)}%` : "0%",
-        embeddingModel: stats.embeddingModel || "none",
+        vectorsEmbedded: {
+          text: stats.embeddedCount,
+          code: stats.embeddedCodeCount,
+        },
+        vectorCoverage: stats.totalChunks ? `${Math.round(totalVectors / stats.totalChunks * 100)}%` : "0%",
+        embeddingModels: {
+          text: stats.embeddingModel || "none",
+          code: stats.codeEmbeddingModel || "none",
+        },
         totalTokens: stats.totalTokens,
         lastBuild: stats.lastBuild || "never",
         ragConfig: config,

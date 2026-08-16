@@ -46,8 +46,12 @@ import {
   cosineSimilarity,
   normalize,
   DEFAULT_TEXT_EXTS,
+  CODE_EMBEDDING_MODEL,
   normalizeExt,
   resolveExtensions,
+  resolveCodeExtensions,
+  resolveDocExtensions,
+  classifyFile,
   collectFiles,
   collectFromTracked,
   isExcludedByConfig,
@@ -287,6 +291,122 @@ describe("resolveExtensions", () => {
     const baseline = resolveExtensions({ extraExtensions: [], excludeExtensions: [] }).size;
     const exts = resolveExtensions({ extraExtensions: ["", "   "], excludeExtensions: ["", "  "] });
     expect(exts.size).toBe(baseline);
+  });
+});
+
+// ─── extension groups (code vs text model routing) ─────────────────────────
+
+describe("resolveCodeExtensions / resolveDocExtensions / classifyFile", () => {
+  it("code defaults land in the code group, prose/data in the text group", () => {
+    const cfg = { extraExtensions: [], excludeExtensions: [] };
+    const code = resolveCodeExtensions(cfg);
+    const docs = resolveDocExtensions(cfg);
+    expect(code.has(".ts")).toBe(true);
+    expect(code.has(".py")).toBe(true);
+    expect(code.has(".css")).toBe(true);
+    expect(code.has(".twig")).toBe(true); // template languages: consistent with .vue/.svelte/.astro
+    expect(docs.has(".md")).toBe(true);
+    expect(docs.has(".json")).toBe(true);
+    expect(docs.has(".html")).toBe(true);
+    // No overlap, and the union reproduces the full allowlist.
+    for (const e of code) expect(docs.has(e), `${e} in both groups`).toBe(false);
+    expect(code.size + docs.size).toBe(DEFAULT_TEXT_EXTS.length);
+  });
+
+  it("extraCodeExtensions are added to the code group only", () => {
+    const code = resolveCodeExtensions({ extraCodeExtensions: ["zig", ".RAKU"] });
+    const docs = resolveDocExtensions({ extraCodeExtensions: ["zig"] });
+    expect(code.has(".zig")).toBe(true);
+    expect(code.has(".raku")).toBe(true);
+    expect(docs.has(".zig")).toBe(false);
+  });
+
+  it("generic extras land in the text group unless they are code defaults", () => {
+    const docs = resolveDocExtensions({ extraExtensions: [".tex", ".nix"] });
+    expect(docs.has(".tex")).toBe(true);
+    expect(docs.has(".nix")).toBe(true);
+    // .py is a code default — a generic extra must NOT duplicate it into text
+    const docsPy = resolveDocExtensions({ extraExtensions: [".py"] });
+    expect(docsPy.has(".py")).toBe(false);
+  });
+
+  it("excludeExtensions remove from both groups", () => {
+    const code = resolveCodeExtensions({ excludeExtensions: [".ts"] });
+    const docs = resolveDocExtensions({ excludeExtensions: [".md"] });
+    expect(code.has(".ts")).toBe(false);
+    expect(docs.has(".md")).toBe(false);
+  });
+
+  it("classifyFile routes by extension and config", () => {
+    expect(classifyFile("/src/server.ts")).toBe("code");
+    expect(classifyFile("/src/style.css")).toBe("code");
+    expect(classifyFile("/docs/README.md")).toBe("text");
+    expect(classifyFile("/docs/report.pdf")).toBe("text");
+    expect(classifyFile("/data/config.yaml")).toBe("text");
+    expect(classifyFile("no-extension")).toBe("text");
+    // user-added code ext routes to code
+    expect(classifyFile("/x/main.zig", { extraCodeExtensions: [".zig"] })).toBe("code");
+    // excluding a code ext from the code set drops it back to text
+    expect(classifyFile("/x/a.ts", { excludeExtensions: [".ts"] })).toBe("text");
+  });
+});
+
+// ─── dual-model schema migration ────────────────────────────────────────────
+
+describe("initSchema: dual-model migration", () => {
+  function seedLegacyStore(db: Database.Database) {
+    const insChunk = db.prepare(`
+      INSERT INTO chunks(id, file_path, chunk_content, line_start, line_end, chunk_hash, indexed_at, tokens)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const insVec = db.prepare("INSERT INTO chunks_vec(rowid, embedding) VALUES (CAST(? AS INTEGER), ?)");
+    const insFile = db.prepare(`
+      INSERT OR REPLACE INTO files(path, hash, chunks, indexed, size, embedded)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    const vec = new Float32Array(768).fill(0.1);
+    for (const [id, fp] of [["c-1", "/src/a.ts"], ["c-2", "/src/notes.md"]] as const) {
+      const r = insChunk.run(id, fp, "content", 1, 1, "h", "2026-05-15T00:00:00Z", 1);
+      insVec.run(Number(r.lastInsertRowid), Buffer.from(vec.buffer, vec.byteOffset, vec.byteLength));
+      insFile.run(fp, "h", 1, "2026-05-15T00:00:00Z", 7, 1);
+    }
+  }
+
+  it("introducing the code model clears code files but keeps prose chunks + vectors", () => {
+    const db = new Database(":memory:");
+    db.pragma("journal_mode = WAL");
+    loadVec(db);
+    initSchema(db);
+    seedLegacyStore(db);
+    // Realistic legacy store: text-model metadata recorded by every
+    // indexFiles run, no code-model metadata (pre-dual-model version).
+    db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES ('embedding_model', 'nomic-ai/nomic-embed-text-v1.5')").run();
+    db.exec("DELETE FROM metadata WHERE key='embedding_model_code'");
+    expect((db.prepare("SELECT COUNT(*) AS n FROM chunks").get() as { n: number }).n).toBe(2);
+    initSchema(db);
+
+    // Code file cleared, prose file + its nomic vector survive.
+    const paths = (db.prepare("SELECT file_path FROM chunks").all() as Array<{ file_path: string }>).map(r => r.file_path);
+    expect(paths).toEqual(["/src/notes.md"]);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM chunks_vec").get() as { n: number }).n).toBe(1);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM files").get() as { n: number }).n).toBe(1);
+    // Code-model metadata now recorded so the migration is one-shot.
+    const meta = db.prepare("SELECT value FROM metadata WHERE key='embedding_model_code'").get() as { value: string };
+    expect(meta.value).toBe(CODE_EMBEDDING_MODEL);
+    // The code vec table exists (recreated empty).
+    expect((db.prepare("SELECT COUNT(*) AS n FROM chunks_vec_code").get() as { n: number }).n).toBe(0);
+    db.close();
+  });
+
+  it("is one-shot: re-running initSchema with matching metadata wipes nothing", () => {
+    const db = new Database(":memory:");
+    db.pragma("journal_mode = WAL");
+    loadVec(db);
+    initSchema(db);
+    seedLegacyStore(db);
+    initSchema(db); // metadata already recorded by the first initSchema
+    expect((db.prepare("SELECT COUNT(*) AS n FROM chunks").get() as { n: number }).n).toBe(2);
+    db.close();
   });
 });
 
@@ -996,6 +1116,7 @@ describe("Storage (loadConfig/saveConfig/loadIndex/saveIndex/ensureDir)", () => 
     expect(cfg.ragScoreThreshold).toBe(0.1);
     expect(cfg.ragAlpha).toBe(0.4);
     expect(cfg.extraExtensions).toEqual([]);
+    expect(cfg.extraCodeExtensions).toEqual([]);
     expect(cfg.excludeExtensions).toEqual([]);
     expect(cfg.trackedPaths).toEqual([]);
     expect(cfg.excludePatterns).toEqual([]);
@@ -1008,6 +1129,7 @@ describe("Storage (loadConfig/saveConfig/loadIndex/saveIndex/ensureDir)", () => 
       ragScoreThreshold: 0.25,
       ragAlpha: 0.7,
       extraExtensions: [".cs", ".tex"],
+      extraCodeExtensions: [".zig"],
       excludeExtensions: [".md"],
       trackedPaths: ["/tmp/proj-a", "/tmp/proj-b"],
       excludePatterns: ["*.log", "node_modules/"],
@@ -1353,7 +1475,7 @@ describe("isIndexStale", () => {
   const stale = () => new Date(Date.now() - DAY_MS - 1_000).toISOString();
   const makeStats = (lastBuild: string): IndexStats => ({
     totalChunks: 0, totalFiles: 0, totalTokens: 0,
-    embeddedCount: 0, lastBuild, embeddingModel: "",
+    embeddedCount: 0, embeddedCodeCount: 0, lastBuild, embeddingModel: "", codeEmbeddingModel: "",
   });
 
   it("returns false when lastBuild is empty", () => {

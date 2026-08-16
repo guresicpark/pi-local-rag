@@ -1,8 +1,22 @@
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { EMBEDDING_MODEL, QUERY_PREFIX, DOC_PREFIX } from "./constants.ts";
+import {
+  EMBEDDING_MODEL, QUERY_PREFIX, DOC_PREFIX,
+  CODE_EMBEDDING_MODEL, CODE_QUERY_PREFIX, CODE_DOC_PREFIX,
+  type EmbedGroup,
+} from "./constants.ts";
 
-let _pipeline: any = null;
+interface ModelSpec {
+  id: string;
+  queryPrefix: string;
+  docPrefix: string;
+}
+
+/** Per-group model registry: text → nomic, code → jina. */
+export const EMBED_MODELS: Record<EmbedGroup, ModelSpec> = {
+  text: { id: EMBEDDING_MODEL, queryPrefix: QUERY_PREFIX, docPrefix: DOC_PREFIX },
+  code: { id: CODE_EMBEDDING_MODEL, queryPrefix: CODE_QUERY_PREFIX, docPrefix: CODE_DOC_PREFIX },
+};
 
 /**
  * Persistent HuggingFace model cache directory.
@@ -22,21 +36,39 @@ export function resolveModelCacheDir(): string {
   return join(homedir(), ".cache", "huggingface", "transformers");
 }
 
-async function getEmbedder() {
-  if (_pipeline) return _pipeline;
-  const { pipeline, env } = await import("@huggingface/transformers");
-  env.cacheDir = resolveModelCacheDir();
-  // q8 = quantized ONNX weights (~111 MB vs ~547 MB fp32) — keeps the
-  // first-run download reasonable with negligible quality loss.
-  _pipeline = await pipeline("feature-extraction", EMBEDDING_MODEL, { dtype: "q8" });
-  return _pipeline;
+// One pipeline per group — nomic for prose, jina for code. The load promise
+// is cached (not the resolved pipeline) so concurrent first calls share a
+// single download; a failed load is evicted so the next call retries.
+const _pipelines = new Map<EmbedGroup, Promise<any>>();
+
+export async function getEmbedder(group: EmbedGroup = "text"): Promise<any> {
+  const cached = _pipelines.get(group);
+  if (cached) return cached;
+  const spec = EMBED_MODELS[group];
+  const load = (async () => {
+    const { pipeline, env } = await import("@huggingface/transformers");
+    env.cacheDir = resolveModelCacheDir();
+    // q8 = quantized ONNX weights (~111 MB nomic, ~170 MB jina-code, vs
+    // ~547/~650 MB fp32) — keeps first-run downloads reasonable with
+    // negligible quality loss.
+    return pipeline("feature-extraction", spec.id, { dtype: "q8" });
+  })();
+  _pipelines.set(group, load);
+  load.catch(() => _pipelines.delete(group));
+  return load;
 }
 
-/** Embed a search query (applies the nomic `search_query:` prefix). */
-export async function embed(text: string): Promise<number[]> {
-  const embedder = await getEmbedder();
-  const output = await embedder(QUERY_PREFIX + text, { pooling: "mean", normalize: true });
+/** Embed a search query with a specific group's model. */
+export async function embedQueryFor(group: EmbedGroup, text: string): Promise<number[]> {
+  const spec = EMBED_MODELS[group];
+  const embedder = await getEmbedder(group);
+  const output = await embedder(spec.queryPrefix + text, { pooling: "mean", normalize: true });
   return Array.from(output.data as Float32Array);
+}
+
+/** Embed a search query with the text/prose model (nomic `search_query:` prefix). */
+export async function embed(text: string): Promise<number[]> {
+  return embedQueryFor("text", text);
 }
 
 /**
@@ -49,41 +81,58 @@ const yield_ = () => new Promise<void>(r => setTimeout(r, 0));
 /** Default batch size for a single ONNX forward pass. */
 export const BATCH_SIZE = 64;
 
+export interface EmbedBatchOpts {
+  onProgress?: (done: number, total: number) => void;
+  /** Fired right before a group's model is downloaded/loaded (only when not
+   *  already cached in this process) — lets the UI explain a multi-minute
+   *  cold-start instead of looking stuck. */
+  onModelLoad?: (modelId: string) => void;
+}
+
 /**
- * Embed `texts` using true batched ONNX inference.
+ * Embed `texts` with a specific group's model using true batched ONNX
+ * inference — one forward pass per BATCH_SIZE texts (~BATCH_SIZE× speedup
+ * on CPU). The output Tensor has dims [batchSize, dim]; sliced per-text.
  *
- * The model is called once per batch of up to `BATCH_SIZE` texts rather than
- * once per text, giving a ~BATCH_SIZE× speedup on CPU.  The output Tensor has
- * dims [batchSize, VECTOR_DIM]; we slice it into per-text arrays.
- *
- * `onProgress` is fired after each batch with the cumulative count so the TUI
- * can render a smooth progress bar (same contract as before).
+ * `onProgress` fires after each batch with the cumulative count so the TUI
+ * can render a smooth progress bar; `onModelLoad` fires once per model.
  */
-export async function embedBatch(
+export async function embedBatchFor(
+  group: EmbedGroup,
   texts: string[],
-  onProgress?: (i: number, total: number) => void,
+  opts: EmbedBatchOpts = {},
 ): Promise<number[][]> {
   if (texts.length === 0) return [];
-  const embedder = await getEmbedder();
+  if (!_pipelines.has(group)) opts.onModelLoad?.(EMBED_MODELS[group].id);
+  const spec = EMBED_MODELS[group];
+  const embedder = await getEmbedder(group);
   const results: number[][] = new Array(texts.length);
 
   for (let start = 0; start < texts.length; start += BATCH_SIZE) {
     const batch = texts.slice(start, start + BATCH_SIZE);
     // Pass the whole batch in a single forward pass — the model returns a
-    // Tensor with dims [batchSize, VECTOR_DIM]. Documents get the nomic
-    // `search_document:` prefix.
-    const output = await embedder(batch.map(t => DOC_PREFIX + t), { pooling: "mean", normalize: true });
+    // Tensor with dims [batchSize, dim]. Documents get the group's doc
+    // prefix (nomic task instruction; jina v2 uses none).
+    const output = await embedder(batch.map(t => spec.docPrefix + t), { pooling: "mean", normalize: true });
     const flat = output.data as Float32Array;
-    const dim = flat.length / batch.length; // should equal VECTOR_DIM (768)
+    const dim = flat.length / batch.length; // 768 for both current models
 
     for (let j = 0; j < batch.length; j++) {
       results[start + j] = Array.from(flat.subarray(j * dim, (j + 1) * dim));
     }
 
-    onProgress?.(Math.min(start + batch.length, texts.length), texts.length);
+    opts.onProgress?.(Math.min(start + batch.length, texts.length), texts.length);
     // Yield after each batch so the TUI can re-render before the next pass.
     await yield_();
   }
 
   return results;
+}
+
+/** Back-compat: batch-embed with the text/prose model. */
+export async function embedBatch(
+  texts: string[],
+  onProgress?: (i: number, total: number) => void,
+): Promise<number[][]> {
+  return embedBatchFor("text", texts, { onProgress });
 }

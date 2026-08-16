@@ -1,19 +1,23 @@
 import { basename } from "node:path";
 import Database from "better-sqlite3";
 import { getDbConn, type IndexStats } from "./db.ts";
-import { EMBEDDING_MODEL } from "./constants.ts";
-import { embedBatch } from "./embed.ts";
+import { EMBEDDING_MODEL, CODE_EMBEDDING_MODEL, type EmbedGroup } from "./constants.ts";
+import { embedBatchFor } from "./embed.ts";
 import { chunkText, extractText, sha256 } from "./chunking.ts";
+import { classifyFile, loadConfig } from "./config.ts";
 import * as repo from "./repository.ts";
 
 export interface ProgressCallbacks {
   onFile?: (current: number, total: number, filename: string, skipped: number) => void;
   onChunk?: (fileChunk: number, totalChunks: number, filename: string) => void;
-  /** Fires after each cross-file embed micro-batch completes. `done` is the
-   *  number of chunks embedded so far across all files; `total` is the grand
-   *  total. Used by the TUI to render live embedding progress instead of
-   *  freezing at "Rebuilding 100%". */
-  onEmbed?: (done: number, total: number) => void;
+  /** Fires after each cross-file embed micro-batch completes, per embedding
+   *  group — `done`/`total` are scoped to `group` ("code" → jina model,
+   *  "text" → nomic model), so the TUI can render one progress line per
+   *  model instead of a single aggregate bar. */
+  onEmbed?: (done: number, total: number, group: EmbedGroup) => void;
+  /** Fires right before a group's model is downloaded/loaded (once per model
+   *  per process) — covers the silent multi-minute cold-start download. */
+  onModelLoad?: (group: EmbedGroup, model: string) => void;
   onSave?: () => void;
 }
 
@@ -35,6 +39,7 @@ interface FileWork {
   fp: string;
   hash: string;
   size: number;
+  group: EmbedGroup;
   rawChunks: { content: string; lineStart: number; lineEnd: number; hash: string }[];
   _vectors?: number[][];
 }
@@ -44,16 +49,17 @@ export async function indexFiles(
   progress?: ProgressCallbacks,
   _db?: Database.Database,
   force?: boolean,
-): Promise<{ indexed: number; chunks: number; skipped: number; durationMs: number }> {
+): Promise<{ indexed: number; chunks: number; chunksByGroup: Record<EmbedGroup, number>; skipped: number; durationMs: number }> {
   const hadCallbacks = !!progress;
   if (hadCallbacks) _suppressStderr = true;
   const database = _db ?? getDbConn();
+  const config = loadConfig();
   const startMs = Date.now();
   const total = paths.length;
 
   try {
     if (total === 0) {
-      return { indexed: 0, chunks: 0, skipped: 0, durationMs: Date.now() - startMs };
+      return { indexed: 0, chunks: 0, chunksByGroup: { code: 0, text: 0 }, skipped: 0, durationMs: Date.now() - startMs };
     }
 
     // Phase 1: parallel read + chunk; DB ops on main thread
@@ -110,13 +116,14 @@ export async function indexFiles(
         }
 
         repo.deleteVectorsForFile(database, r.fp);
+        repo.deleteCodeVectorsForFile(database, r.fp);
         repo.deleteChunksForFile(database, r.fp);
 
         const rawChunks = r.raw.map(c => ({ ...c, hash: sha256(c.content) }));
         stderrProgress(`[${processedCount}/${total}] chunked ${name} (${rawChunks.length} chunks)`);
         progress?.onFile?.(processedCount, total, name, skipped);
 
-        toIndex.push({ fp: r.fp, hash: r.hash, size: r.size, rawChunks });
+        toIndex.push({ fp: r.fp, hash: r.hash, size: r.size, group: classifyFile(r.fp, config), rawChunks });
       }
     };
 
@@ -137,47 +144,54 @@ export async function indexFiles(
 
     skipped += readErrorCount;
 
-    // Phase 2: embed in cross-file groups
+    // Phase 2: embed in cross-file groups, per embedding model. Code chunks
+    // go through the jina pipeline, prose chunks through nomic — each with
+    // its own progress counter.
     const EMBED_GROUP_TARGET = 256;
-    const totalChunks = toIndex.reduce((s, f) => s + f.rawChunks.length, 0);
-    const pairs: { fw: FileWork; ci: number }[] = [];
+    const groupPairs: Record<EmbedGroup, { fw: FileWork; ci: number }[]> = { code: [], text: [] };
     for (const fw of toIndex) {
-      for (let j = 0; j < fw.rawChunks.length; j++) pairs.push({ fw, ci: j });
+      for (let j = 0; j < fw.rawChunks.length; j++) groupPairs[fw.group].push({ fw, ci: j });
     }
     // Sort by content length so each group embeds similar-length texts
     // together — ONNX pads every text in a batch to the longest, so an
     // unsored mix inflates the attention matrix for all its neighbors.
     // Vectors are written back by position, so embed order is free.
-    pairs.sort((a, b) => a.fw.rawChunks[a.ci].content.length - b.fw.rawChunks[b.ci].content.length);
-
-    const flushGroup = async (group: { fw: FileWork; ci: number }[], startIdx: number) => {
-      if (group.length === 0) return;
-      const texts = group.map(g => g.fw.rawChunks[g.ci].content);
-      // Fire before the batch too, so the TUI flips to the "Embedding" widget
-      // (covering first-run model download) instead of the stale 100% screen.
-      progress?.onEmbed?.(startIdx, totalChunks);
-      stderrProgress(`Embedding ${startIdx + 1}…${startIdx + group.length}/${totalChunks} chunks`);
-      // Forward embedBatch's per-batch (BATCH_SIZE) progress so the TUI
-      // updates every 64 chunks instead of once per 256-chunk group.
-      const vectors = await embedBatch(texts, done => {
-        progress?.onEmbed?.(startIdx + done, totalChunks);
-      });
-      for (let vi = 0; vi < group.length; vi++) {
-        const g = group[vi];
-        g.fw._vectors ??= new Array(g.fw.rawChunks.length);
-        g.fw._vectors[g.ci] = vectors[vi];
-      }
-      progress?.onEmbed?.(startIdx + group.length, totalChunks);
-      // Yield so the TUI can render the progress update before the next batch.
-      await yield_();
-    };
-
-    for (let p = 0; p < pairs.length; p += EMBED_GROUP_TARGET) {
-      await flushGroup(pairs.slice(p, p + EMBED_GROUP_TARGET), p);
+    for (const g of ["code", "text"] as const) {
+      groupPairs[g].sort((a, b) => a.fw.rawChunks[a.ci].content.length - b.fw.rawChunks[b.ci].content.length);
     }
 
-    // Phase 3: insert chunks + vectors into DB
+    for (const g of ["code", "text"] as const) {
+      const pairs = groupPairs[g];
+      const groupTotal = pairs.length;
+      for (let p = 0; p < pairs.length; p += EMBED_GROUP_TARGET) {
+        const slice = pairs.slice(p, p + EMBED_GROUP_TARGET);
+        const texts = slice.map(x => x.fw.rawChunks[x.ci].content);
+        // Fire before the batch too, so the TUI flips to the "Embedding"
+        // widget (covering first-run model download) instead of the stale
+        // 100% screen.
+        progress?.onEmbed?.(p, groupTotal, g);
+        stderrProgress(`Embedding(${g}) ${p + 1}…${p + slice.length}/${groupTotal} chunks`);
+        // Forward embedBatchFor's per-batch (BATCH_SIZE) progress so the TUI
+        // updates every 64 chunks instead of once per 256-chunk group.
+        const vectors = await embedBatchFor(g, texts, {
+          onProgress: done => progress?.onEmbed?.(p + done, groupTotal, g),
+          onModelLoad: model => progress?.onModelLoad?.(g, model),
+        });
+        for (let vi = 0; vi < slice.length; vi++) {
+          const x = slice[vi];
+          x.fw._vectors ??= new Array(x.fw.rawChunks.length);
+          x.fw._vectors[x.ci] = vectors[vi];
+        }
+        progress?.onEmbed?.(p + slice.length, groupTotal, g);
+        // Yield so the TUI can render the progress update before the next batch.
+        await yield_();
+      }
+    }
+
+    // Phase 3: insert chunks + vectors into DB (each group's vectors into
+    // its own vec table)
     let chunked = 0;
+    const chunksByGroup: Record<EmbedGroup, number> = { code: 0, text: 0 };
     const indexedAt = new Date().toISOString();
     const tx = database.transaction(() => {
       for (const fw of toIndex) {
@@ -189,12 +203,14 @@ export async function indexFiles(
             filePath: fw.fp, content: c.content,
             lineStart: c.lineStart, lineEnd: c.lineEnd, hash: c.hash,
             indexedAt, tokens: Math.ceil(c.content.length / 4),
-          });          
+          });
           if (vectors?.[j]) {
-            repo.insertVector(database, Number(chunkResult.lastInsertRowid), vectors[j]);
+            if (fw.group === "code") repo.insertCodeVector(database, Number(chunkResult.lastInsertRowid), vectors[j]);
+            else repo.insertVector(database, Number(chunkResult.lastInsertRowid), vectors[j]);
           }
           chunked++;
         }
+        chunksByGroup[fw.group] += fw.rawChunks.length;
         repo.upsertFile(database, fw.fp, fw.hash, fw.rawChunks.length, indexedAt, fw.size, true);
       }
     });
@@ -205,8 +221,9 @@ export async function indexFiles(
     progress?.onSave?.();
     repo.setMetadata(database, repo.MetadataKey.LastBuild, new Date().toISOString());
     repo.setMetadata(database, repo.MetadataKey.EmbeddingModel, EMBEDDING_MODEL);
+    repo.setMetadata(database, repo.MetadataKey.EmbeddingCodeModel, CODE_EMBEDDING_MODEL);
 
-    return { indexed: toIndex.length, chunks: chunked, skipped, durationMs: Date.now() - startMs };
+    return { indexed: toIndex.length, chunks: chunked, chunksByGroup, skipped, durationMs: Date.now() - startMs };
   } finally {
     if (hadCallbacks) _suppressStderr = false;
   }

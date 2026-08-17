@@ -21,61 +21,109 @@ function isTrimWs(c: number): boolean {
   return c === 32 || (c >= 9 && c <= 13) || c === 0xa0 || c === 0xfeff || c === 0x2028 || c === 0x2029;
 }
 
-/** `s.trim() === ""` without the trimmed-copy allocation — exits at the
- *  first non-whitespace char, which for code lines is usually char 0. */
-function isBlankRow(s: string): boolean {
-  for (let i = 0; i < s.length; i++) if (!isTrimWs(s.charCodeAt(i))) return false;
+/** True when [from, to) of `s` contains no non-whitespace character —
+ *  like `s.trim() === ""` on the slice, with no allocation and an exit at
+ *  the first non-whitespace char (usually char 0 for code lines). */
+function isBlankRange(s: string, from: number, to: number): boolean {
+  for (let i = from; i < to; i++) if (!isTrimWs(s.charCodeAt(i))) return false;
   return true;
 }
 
-/** `s.trim().length > n` without allocating the trimmed copy. */
-function trimLenGT(s: string, n: number): boolean {
-  let f = 0;
-  const L = s.length;
-  while (f < L && isTrimWs(s.charCodeAt(f))) f++;
-  if (f === L) return false;
-  let l = L - 1;
+function isBlankRow(s: string): boolean {
+  return isBlankRange(s, 0, s.length);
+}
+
+/** `s.slice(from, to).trim().length > n` without allocating anything. */
+function trimLenGTRange(s: string, from: number, to: number, n: number): boolean {
+  let f = from;
+  let l = to - 1;
+  while (f <= l && isTrimWs(s.charCodeAt(f))) f++;
+  if (f > l) return false;
   while (l > f && isTrimWs(s.charCodeAt(l))) l--;
   return l - f + 1 > n;
 }
 
+function trimLenGT(s: string, n: number): boolean {
+  return trimLenGTRange(s, 0, s.length, n);
+}
+
 export function chunkText(text: string, maxLines = 50): { content: string; lineStart: number; lineEnd: number }[] {
-  const lines = text.split("\n");
   const chunks: { content: string; lineStart: number; lineEnd: number }[] = [];
 
-  // Split pathologically long lines (minified JS/JSON, CSV rows, base64
-  // blobs) into MAX_LINE_CHARS segments. Segments of one source line share
-  // that line's number so references stay accurate. Rows live in parallel
-  // arrays (text + source line) instead of one object per row, and are
-  // built lazily: when no line exceeds the cap (the common case) rows map
-  // 1:1 onto `lines` and the expansion is skipped entirely.
-  let rowTexts: string[] = lines;
-  let rowNums: number[] | null = null;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (line.length <= MAX_LINE_CHARS) {
-      if (rowNums) { rowTexts.push(line); rowNums.push(i + 1); }
-      continue;
+  // Scan line boundaries once — indexOf walks the string with SIMD memchr
+  // and, unlike text.split("\n"), materializes no per-line strings. Line j
+  // spans [starts[j], starts[j+1] - 1), the last line to text.length.
+  const starts: number[] = [0];
+  let hasLongLine = false;
+  {
+    let prev = 0;
+    let p = text.indexOf("\n");
+    while (p !== -1) {
+      if (p - prev > MAX_LINE_CHARS) hasLongLine = true;
+      prev = p + 1;
+      starts.push(prev);
+      p = text.indexOf("\n", prev);
     }
-    if (!rowNums) {
-      rowTexts = lines.slice(0, i);
-      rowNums = Array.from({ length: i }, (_, k) => k + 1);
+    if (text.length - prev > MAX_LINE_CHARS) hasLongLine = true;
+  }
+  const lineCount = starts.length;
+  const endOf = (j: number): number => (j + 1 < lineCount ? starts[j + 1] - 1 : text.length);
+
+  if (!hasLongLine) {
+    // Fast path (no line exceeds the cap — the overwhelmingly common case):
+    // rows map 1:1 onto source lines and every chunk is a contiguous slice
+    // of `text`, so content comes straight from substring() — in V8 an O(1)
+    // sliced string sharing the parent, no bytes copied and no join needed.
+    let i = 0;
+    while (i < lineCount) {
+      let end = Math.min(i + maxLines, lineCount);
+      for (let j = end - 1; j > i + 10 && j > end - 15; j--) {
+        if (isBlankRange(text, starts[j], endOf(j))) { end = j + 1; break; }
+      }
+      // Shrink the window further if the joined content would exceed
+      // MAX_CHUNK_CHARS (≈1k tokens — the embedding model's sweet spot).
+      let len = endOf(i) - starts[i];
+      for (let j = i + 1; j < end; j++) {
+        len += 1 + (endOf(j) - starts[j]);
+        if (len > MAX_CHUNK_CHARS) { end = j; break; }
+      }
+      const from = starts[i];
+      const to = endOf(end - 1);
+      if (trimLenGTRange(text, from, to, 20)) {
+        chunks.push({ content: text.substring(from, to), lineStart: i + 1, lineEnd: end });
+      }
+      i = end;
     }
-    for (let s = 0; s < line.length; s += MAX_LINE_CHARS) {
-      rowTexts.push(line.slice(s, s + MAX_LINE_CHARS));
-      rowNums.push(i + 1);
+    return chunks;
+  }
+
+  // Slow path — pathologically long lines (minified JS/JSON, CSV rows,
+  // base64 blobs) are split into MAX_LINE_CHARS segments; segments share
+  // the source line's number so references stay accurate. Chunk content is
+  // no longer contiguous in `text` (segments of one line are joined by
+  // injected newlines), so rows are materialized and joined as before.
+  const rowTexts: string[] = [];
+  const rowNums: number[] = [];
+  for (let j = 0; j < lineCount; j++) {
+    const s = starts[j];
+    const e = endOf(j);
+    if (e - s <= MAX_LINE_CHARS) {
+      rowTexts.push(text.substring(s, e));
+      rowNums.push(j + 1);
+    } else {
+      for (let k = s; k < e; k += MAX_LINE_CHARS) {
+        rowTexts.push(text.substring(k, Math.min(k + MAX_LINE_CHARS, e)));
+        rowNums.push(j + 1);
+      }
     }
   }
-  const rowCount = rowTexts.length;
 
   let i = 0;
-  while (i < rowCount) {
-    let end = Math.min(i + maxLines, rowCount);
+  while (i < rowTexts.length) {
+    let end = Math.min(i + maxLines, rowTexts.length);
     for (let j = end - 1; j > i + 10 && j > end - 15; j--) {
       if (isBlankRow(rowTexts[j])) { end = j + 1; break; }
     }
-    // Shrink the window further if the joined content would exceed
-    // MAX_CHUNK_CHARS (≈1k tokens — the embedding model's sweet spot).
     let len = rowTexts[i].length;
     for (let j = i + 1; j < end; j++) {
       len += 1 + rowTexts[j].length;
@@ -83,11 +131,7 @@ export function chunkText(text: string, maxLines = 50): { content: string; lineS
     }
     const chunk = rowTexts.slice(i, end).join("\n");
     if (trimLenGT(chunk, 20)) {
-      chunks.push({
-        content: chunk,
-        lineStart: rowNums ? rowNums[i] : i + 1,
-        lineEnd: rowNums ? rowNums[end - 1] : end,
-      });
+      chunks.push({ content: chunk, lineStart: rowNums[i], lineEnd: rowNums[end - 1] });
     }
     i = end;
   }

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.8
+
+- **Faster chunking — sentinel line-offset terminator** (perf): `chunkText()`'s fast and slow paths repeated a per-chunk / per-line "is this the last line?" ternary (`end < lineCount ? starts[end] : text.length + 1` and friends) on every chunk and every blank-line-scan step. `scanLines()` now materializes one extra sentinel slot — `starts[lineCount] = text.length + 1` — so every `starts[end]` / `starts[j + 1]` read is uniform and the last line ends at `starts[lineCount] - 1 === text.length` with no branch. Output is byte-identical (the randomized chunking differential tests plus the full suite still pass); measured ~5–15% faster on realistic corpora (code ~10.10→9.85 ms, prose ~5.10→4.40 ms per ~2 MB), neutral elsewhere.
+
 ## 0.7.7
 
 - **Scoped DB lifecycle — command handlers & tools no longer leak the connection** (fix/memory): the `/rag` command handlers (`search`, `index`, `rebuild`, `refresh`, `find`, bare status) and the three tools (`rag_index`, `rag_query`, `rag_status`) opened the shared connection via `getDbConn()` but never closed it — only `before_agent_start` and `session_start` paired it with `closeDbConn()`, so every command/tool invocation leaked an open SQLite handle (and the WAL file descriptor) for the process lifetime. A new `withDb()` helper in `db.ts` opens the connection, runs a callback, and closes it in a `finally` (also on throw); every handler and tool now runs through it. `loadIndex()`/`getIndexedFiles()`/`getIndexedPaths()` gained optional `db` params so callers pass the scoped handle instead of reaching for the singleton.

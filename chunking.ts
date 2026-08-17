@@ -15,6 +15,21 @@ export function sha256(data: string): string {
   return createHash("sha256").update(data).digest("hex").slice(0, 12);
 }
 
+/** sha256 over a Buffer's bytes, streamed in 64 KiB latin-1 windows.
+ *  update() UTF-8-encodes each window exactly as the old one-shot
+ *  `sha256(buf.toString("binary"))` encoded the whole string, and SHA-256
+ *  digests concatenated updates identically — so stored hashes stay
+ *  compatible — while the transient string stays bounded at 64 KiB instead
+ *  of materializing a full copy of a multi-megabyte PDF/DOCX (times the 32
+ *  concurrent indexing producers). */
+export function sha256Buf(buf: Buffer): string {
+  const h = createHash("sha256");
+  for (let i = 0; i < buf.length; i += 65536) {
+    h.update(buf.subarray(i, Math.min(i + 65536, buf.length)).toString("binary"));
+  }
+  return h.digest("hex").slice(0, 12);
+}
+
 /** True for the exact character set String.prototype.trim removes
  *  (WhiteSpace + LineTerminator per spec). */
 function isTrimWs(c: number): boolean {
@@ -441,13 +456,13 @@ export async function extractText(fp: string): Promise<{ text: string; hash: str
         );
       }
     }
-    return { text, hash: sha256(buf.toString("binary")), size: buf.length };
+    return { text, hash: sha256Buf(buf), size: buf.length };
   }
   if (ext === ".docx") {
     const buf = readFileSync(fp);
     const { default: mammoth } = await import("mammoth");
     const { value } = await mammoth.extractRawText({ buffer: buf });
-    return { text: value, hash: sha256(buf.toString("binary")), size: buf.length };
+    return { text: value, hash: sha256Buf(buf), size: buf.length };
   }
   if (ext === ".html" || ext === ".htm") {
     const { default: TurndownService } = await import("turndown");

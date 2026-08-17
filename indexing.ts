@@ -35,13 +35,20 @@ function stderrProgress(msg: string) {
   process.stderr.write(`\r\x1b[2K${msg}`);
 }
 
+interface HashedChunk { content: string; lineStart: number; lineEnd: number; hash: string }
+
 interface FileWork {
   fp: string;
   hash: string;
   size: number;
   group: EmbedGroup;
-  rawChunks: { content: string; lineStart: number; lineEnd: number; hash: string }[];
-  _vectors?: Float32Array[];
+  /** Cached sha256(fp) — the chunk-id prefix, previously recomputed per chunk. */
+  idPrefix: string;
+  /** Slots are nulled as soon as a chunk is durable, releasing its content
+   *  (and with the file's last chunk, the parent text the slices pinned). */
+  rawChunks: (HashedChunk | null)[];
+  /** Chunks not yet written; hits 0 → upsertFile. */
+  pending: number;
 }
 
 export async function indexFiles(
@@ -129,11 +136,18 @@ export async function indexFiles(
         repo.deleteCodeVectorsForFile(database, r.fp);
         repo.deleteChunksForFile(database, r.fp);
 
-        const rawChunks = r.raw.map(c => ({ ...c, hash: sha256(c.content) }));
+        // Annotate chunks with their hash in place — a `{ ...c, hash }`
+        // spread map briefly doubled the chunk-object count per file.
+        const rawChunks = r.raw as HashedChunk[];
+        for (const c of rawChunks) c.hash = sha256(c.content);
         stderrProgress(`[${processedCount}/${total}] chunked ${name} (${rawChunks.length} chunks)`);
         progress?.onFile?.(processedCount, total, name, skipped);
 
-        toIndex.push({ fp: r.fp, hash: r.hash, size: r.size, group: classifyFile(r.fp, config), rawChunks });
+        toIndex.push({
+          fp: r.fp, hash: r.hash, size: r.size,
+          group: classifyFile(r.fp, config), idPrefix: sha256(r.fp),
+          rawChunks, pending: rawChunks.length,
+        });
       }
     };
 
@@ -154,9 +168,15 @@ export async function indexFiles(
 
     skipped += readErrorCount;
 
-    // Phase 2: embed in cross-file groups, per embedding model. Code chunks
-    // go through the jina pipeline, prose chunks through nomic — each with
-    // its own progress counter.
+    // Phase 2+3: embed in cross-file groups, per embedding model, and write
+    // each slice to the DB as soon as its vectors arrive. Interleaving embed
+    // with insert — instead of accumulating every chunk's text plus one
+    // 768-dim Float32Array per chunk for the whole corpus until a single
+    // giant end-of-run transaction — lets each slice's strings and vectors
+    // be collected right after they hit the database, and keeps every
+    // transaction (and therefore the WAL) small. Code chunks go through the
+    // jina pipeline, prose chunks through nomic — each with its own
+    // progress counter.
     const EMBED_GROUP_TARGET = 256;
     const groupPairs: Record<EmbedGroup, { fw: FileWork; ci: number }[]> = { code: [], text: [] };
     for (const fw of toIndex) {
@@ -167,15 +187,44 @@ export async function indexFiles(
     // unsored mix inflates the attention matrix for all its neighbors.
     // Vectors are written back by position, so embed order is free.
     for (const g of ["code", "text"] as const) {
-      groupPairs[g].sort((a, b) => a.fw.rawChunks[a.ci].content.length - b.fw.rawChunks[b.ci].content.length);
+      groupPairs[g].sort((a, b) => a.fw.rawChunks[a.ci]!.content.length - b.fw.rawChunks[b.ci]!.content.length);
     }
+
+    let chunked = 0;
+    const chunksByGroup: Record<EmbedGroup, number> = { code: 0, text: 0 };
+    const indexedAt = new Date().toISOString();
+
+    // Files whose chunking produced nothing (fully blank files) never
+    // complete through the embed loop — record them up front so later runs
+    // can skip them.
+    for (const fw of toIndex) {
+      if (fw.rawChunks.length === 0) repo.upsertFile(database, fw.fp, fw.hash, 0, indexedAt, fw.size, true);
+    }
+
+    const insertSlice = database.transaction((entries: { fw: FileWork; ci: number }[], vectors: Float32Array[]) => {
+      for (let k = 0; k < entries.length; k++) {
+        const { fw, ci } = entries[k];
+        const c = fw.rawChunks[ci]!;
+        const chunkResult = repo.insertChunk(database, {
+          id: `${fw.idPrefix}-${c.lineStart}`,
+          filePath: fw.fp, content: c.content,
+          lineStart: c.lineStart, lineEnd: c.lineEnd, hash: c.hash,
+          indexedAt, tokens: Math.ceil(c.content.length / 4),
+        });
+        if (vectors[k]) {
+          if (fw.group === "code") repo.insertCodeVector(database, Number(chunkResult.lastInsertRowid), vectors[k]);
+          else repo.insertVector(database, Number(chunkResult.lastInsertRowid), vectors[k]);
+        }
+        chunked++;
+      }
+    });
 
     for (const g of ["code", "text"] as const) {
       const pairs = groupPairs[g];
       const groupTotal = pairs.length;
       for (let p = 0; p < pairs.length; p += EMBED_GROUP_TARGET) {
         const slice = pairs.slice(p, p + EMBED_GROUP_TARGET);
-        const texts = slice.map(x => x.fw.rawChunks[x.ci].content);
+        const texts = slice.map(x => x.fw.rawChunks[x.ci]!.content);
         // Fire before the batch too, so the TUI flips to the "Embedding"
         // widget (covering first-run model download) instead of the stale
         // 100% screen.
@@ -187,45 +236,25 @@ export async function indexFiles(
           onProgress: done => progress?.onEmbed?.(p + done, groupTotal, g),
           onModelLoad: model => progress?.onModelLoad?.(g, model),
         });
+        insertSlice(slice, vectors);
+        // The slice is durable — drop its chunk contents (which pin their
+        // parent file text) and close out any file whose last chunk just
+        // landed. This is what keeps heap usage roughly flat across the
+        // run instead of tracking the whole corpus.
         for (let vi = 0; vi < slice.length; vi++) {
           const x = slice[vi];
-          x.fw._vectors ??= new Array(x.fw.rawChunks.length);
-          x.fw._vectors[x.ci] = vectors[vi];
+          x.fw.rawChunks[x.ci] = null;
+          chunksByGroup[x.fw.group]++;
+          if (--x.fw.pending === 0) {
+            // rawChunks keeps its slot count as the file's chunk total.
+            repo.upsertFile(database, x.fw.fp, x.fw.hash, x.fw.rawChunks.length, indexedAt, x.fw.size, true);
+          }
         }
         progress?.onEmbed?.(p + slice.length, groupTotal, g);
         // Yield so the TUI can render the progress update before the next batch.
         await yield_();
       }
     }
-
-    // Phase 3: insert chunks + vectors into DB (each group's vectors into
-    // its own vec table)
-    let chunked = 0;
-    const chunksByGroup: Record<EmbedGroup, number> = { code: 0, text: 0 };
-    const indexedAt = new Date().toISOString();
-    const tx = database.transaction(() => {
-      for (const fw of toIndex) {
-        const vectors = fw._vectors;
-        for (let j = 0; j < fw.rawChunks.length; j++) {
-          const c = fw.rawChunks[j];
-          const chunkResult = repo.insertChunk(database, {
-            id: `${sha256(fw.fp)}-${c.lineStart}`,
-            filePath: fw.fp, content: c.content,
-            lineStart: c.lineStart, lineEnd: c.lineEnd, hash: c.hash,
-            indexedAt, tokens: Math.ceil(c.content.length / 4),
-          });
-          if (vectors?.[j]) {
-            if (fw.group === "code") repo.insertCodeVector(database, Number(chunkResult.lastInsertRowid), vectors[j]);
-            else repo.insertVector(database, Number(chunkResult.lastInsertRowid), vectors[j]);
-          }
-          chunked++;
-        }
-        chunksByGroup[fw.group] += fw.rawChunks.length;
-        repo.upsertFile(database, fw.fp, fw.hash, fw.rawChunks.length, indexedAt, fw.size, true);
-      }
-    });
-
-    tx();
 
     if (!hadCallbacks) process.stderr.write(`\r\x1b[2K`);
     progress?.onSave?.();

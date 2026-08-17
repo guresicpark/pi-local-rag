@@ -3,6 +3,8 @@ node_modules/
 *.js
 *.d.ts
 !types/*.d.ts
+!vendor/**
+vendor/**/node_modules/
 *.map
 .DS_Store
 coverage/

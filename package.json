@@ -1,7 +1,7 @@
 {
   "name": "pi-local-rag",
-  "version": "0.9.1",
-  "description": "Local hybrid RAG pipeline for the Pi coding agent. SQLite FTS5 + sqlite-vec, dual ONNX embeddings via Transformers.js (jina-embeddings-v2-base-code for source code, nomic-embed-text-v1.5 for prose), PDF/DOCX/HTML extraction (with OCR fallback), per-project storage, auto-injection. Zero cloud dependency.",
+  "version": "1.0.0",
+  "description": "Local hybrid RAG pipeline for the Pi coding agent. SQLite FTS5 + sqlite-vec on the built-in node:sqlite driver, dual ONNX embeddings via Transformers.js (jina-embeddings-v2-base-code for source code, nomic-embed-text-v1.5 for prose), PDF/DOCX/HTML extraction (with OCR fallback), per-project storage, auto-injection. Zero cloud dependency.",
   "type": "module",
   "main": "./index.ts",
   "exports": {
@@ -9,14 +9,7 @@
   },
   "files": [
     "index.ts",
-    "constants.ts",
-    "store.ts",
-    "config.ts",
-    "db.ts",
-    "chunking.ts",
-    "embed.ts",
-    "search.ts",
-    "indexing.ts",
+    "src/**/*.ts",
     "types/**/*.d.ts",
     "README.md",
     "CHANGELOG.md",
@@ -48,6 +41,7 @@
     "sqlite",
     "fts5",
     "sqlite-vec",
+    "node-sqlite",
     "pdf",
     "docx",
     "ocr"
@@ -63,7 +57,7 @@
     "url": "https://github.com/vahidkowsari/pi-local-rag/issues"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "publishConfig": {
     "access": "public"
@@ -75,12 +69,11 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
-    "better-sqlite3": "^12.10.0",
     "ignore": "^7.0.5",
     "mammoth": "^1.8.0",
-    "pdf-parse": "^1.1.1",
     "sqlite-vec": "^0.1.9",
-    "turndown": "^7.2.4"
+    "turndown": "^7.2.4",
+    "unpdf": "^1.8.1"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.78.1",
@@ -89,13 +82,23 @@
   },
   "overrides": {
     "adm-zip": "^0.6.0",
+    "global-agent": "^4.1.3",
     "onnxruntime-node": "1.23.0",
     "sharp": "^0.35.3"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
+    "@earendil-works/pi-coding-agent": "file:vendor/pi-coding-agent-types",
+    "@earendil-works/pi-tui": ">=0.78.1",
+    "@types/node": "^24.10.9",
     "@vitest/coverage-v8": "^4.1.7",
     "jszip": "^3.10.1",
+    "node-domexception": "file:vendor/node-domexception-native",
+    "typebox": ">=1.3.7",
     "vitest": "^4.1.7"
+  },
+  "allowScripts": {
+    "@google/genai@1.52.0": true,
+    "onnxruntime-node@1.23.0": true,
+    "protobufjs@7.6.5": true
   }
 }

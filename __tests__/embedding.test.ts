@@ -17,7 +17,7 @@
  * Set SKIP_EMBEDDING_TESTS=1 to skip (e.g. in offline CI).
  */
 import { describe, it, expect, afterEach } from "vitest";
-import Database from "better-sqlite3";
+import { DatabaseSync as Database } from "node:sqlite";
 import { load as loadVec } from "sqlite-vec";
 import {
   embed, embedQueryFor, cosineSimilarity, hybridSearch, sha256, initSchema,
@@ -30,7 +30,7 @@ const EMBED_TIMEOUT = 300_000;
 
 // Close the cached DB singleton after every test so it can't leak into the next test
 afterEach(async () => {
-  const { closeDbConn } = await import("../db.ts");
+  const { closeDbConn } = await import("../src/database.ts");
   closeDbConn();
 });
 
@@ -74,8 +74,8 @@ describe("embed (real ONNX)", () => {
     ];
     const vectors = await Promise.all(chunks.map(c => embed(c.content)));
 
-    const db = new Database(":memory:");
-    db.pragma("journal_mode = WAL");
+    const db = new Database(":memory:", { allowExtension: true });
+    db.exec("PRAGMA journal_mode = WAL;");
     loadVec(db);
     initSchema(db);
 
@@ -135,8 +135,8 @@ describe("embedQueryFor('code') (real ONNX, jina-embeddings-v2-base-code)", () =
 
     // Text chunks → nomic space (chunks_vec); code chunks → jina space
     // (chunks_vec_code). Mirrors what indexFiles does per extension group.
-    const db = new Database(":memory:");
-    db.pragma("journal_mode = WAL");
+    const db = new Database(":memory:", { allowExtension: true });
+    db.exec("PRAGMA journal_mode = WAL;");
     loadVec(db);
     initSchema(db);
 
@@ -157,7 +157,7 @@ describe("embedQueryFor('code') (real ONNX, jina-embeddings-v2-base-code)", () =
 
     // Embed docs with the same embedding call the indexer uses for each
     // group: nomic search_document: prefix for prose, jina (no prefix) for code.
-    const { embedBatchFor } = await import("../embed.ts");
+    const { embedBatchFor } = await import("../src/embedding.ts");
     const textVectors = await embedBatchFor("text", textChunks.map(c => c.content));
     const codeVectors = await embedBatchFor("code", codeChunks.map(c => c.content));
 

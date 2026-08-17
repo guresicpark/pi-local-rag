@@ -13,7 +13,7 @@ import { tmpdir, homedir } from "node:os";
 import { join, dirname, relative, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import ignore from "ignore";
-import Database from "better-sqlite3";
+import { DatabaseSync as Database } from "node:sqlite";
 import { load as loadVec } from "sqlite-vec";
 
 // Mock @huggingface/transformers so search/embed tests don't load the ONNX
@@ -75,9 +75,9 @@ import {
 function createTestDb(chunks: Array<{
   id?: string; file?: string; content: string; lineStart?: number; lineEnd?: number;
   vector?: number[];
-}>): Database.Database {
-  const db = new Database(":memory:");
-  db.pragma("journal_mode = WAL");
+}>): Database {
+  const db = new Database(":memory:", { allowExtension: true });
+  db.exec("PRAGMA journal_mode = WAL;");
   loadVec(db);
   initSchema(db);
 
@@ -144,7 +144,7 @@ async function buildMinimalDocx(text: string): Promise<Buffer> {
 // ─── Test lifecycle: close the cached DB singleton after every test ──────────
 // Close the cached DB singleton after every test so it can't leak into the next test
 afterEach(async () => {
-  const { closeDbConn } = await import("../db.ts");
+    const { closeDbConn } = await import("../src/database.ts");
   closeDbConn();
 });
 
@@ -383,7 +383,7 @@ describe("resolveCodeExtensions / resolveDocExtensions / classifyFile", () => {
 // ─── dual-model schema migration ────────────────────────────────────────────
 
 describe("initSchema: dual-model migration", () => {
-  function seedLegacyStore(db: Database.Database) {
+  function seedLegacyStore(db: Database) {
     const insChunk = db.prepare(`
       INSERT INTO chunks(id, file_path, chunk_content, line_start, line_end, chunk_hash, indexed_at, tokens)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -402,8 +402,8 @@ describe("initSchema: dual-model migration", () => {
   }
 
   it("introducing the code model clears code files but keeps prose chunks + vectors", () => {
-    const db = new Database(":memory:");
-    db.pragma("journal_mode = WAL");
+    const db = new Database(":memory:", { allowExtension: true });
+    db.exec("PRAGMA journal_mode = WAL;");
     loadVec(db);
     initSchema(db);
     seedLegacyStore(db);
@@ -428,8 +428,8 @@ describe("initSchema: dual-model migration", () => {
   });
 
   it("is one-shot: re-running initSchema with matching metadata wipes nothing", () => {
-    const db = new Database(":memory:");
-    db.pragma("journal_mode = WAL");
+    const db = new Database(":memory:", { allowExtension: true });
+    db.exec("PRAGMA journal_mode = WAL;");
     loadVec(db);
     initSchema(db);
     seedLegacyStore(db);
@@ -439,8 +439,8 @@ describe("initSchema: dual-model migration", () => {
   });
 
   it("changing the code embedding scheme clears code files but keeps prose vectors", () => {
-    const db = new Database(":memory:");
-    db.pragma("journal_mode = WAL");
+    const db = new Database(":memory:", { allowExtension: true });
+    db.exec("PRAGMA journal_mode = WAL;");
     loadVec(db);
     initSchema(db);
 
@@ -1932,10 +1932,10 @@ describe("getFreshDbConn: [Symbol.dispose] for `using` declaration", () => {
 
   it("returned object is the same Database instance (mutated, not copied)", () => {
     using db = mod.getFreshDbConn();
-    // prepare() is a prototype method on better-sqlite3 Database; the
-    // Object.assign wrapper preserves them all.
+    // prepare()/close()/exec() are prototype methods on node:sqlite's
+    // DatabaseSync; the Object.assign wrapper preserves them all.
     expect(typeof db.prepare).toBe("function");
     expect(typeof db.close).toBe("function");
-    expect(typeof db.pragma).toBe("function");
+    expect(typeof db.exec).toBe("function");
   });
 });

@@ -166,7 +166,7 @@ The extension registers three tools the agent can call directly:
 
 ## How It Works
 
-1. **Index** — files are chunked (~50 lines each, broken at blank lines where possible), embedded by group (code extensions → `jinaai/jina-embeddings-v2-base-code`, everything else → `nomic-ai/nomic-embed-text-v1.5`; both 768-dim), and stored in SQLite. Code chunks are embedded with their file basename prepended so the code model anchors filename-oriented queries; prose gets nomic's `search_document:` prefix. PDF/DOCX go through `pdf-parse`/`mammoth`; HTML is converted to Markdown via `turndown`; scanned PDFs fall back to OCR (`pdftoppm` + `tesseract`) when the system tools are installed.
+1. **Index** — files are chunked (~50 lines each, broken at blank lines where possible), embedded by group (code extensions → `jinaai/jina-embeddings-v2-base-code`, everything else → `nomic-ai/nomic-embed-text-v1.5`; both 768-dim), and stored in SQLite. Code chunks are embedded with their file basename prepended so the code model anchors filename-oriented queries; prose gets nomic's `search_document:` prefix. PDF/DOCX go through `unpdf`/`mammoth`; HTML is converted to Markdown via `turndown`; scanned PDFs fall back to OCR (`pdftoppm` + `tesseract`) when the system tools are installed.
 2. **Search** — FTS5 `bm25()` + `sqlite-vec` cosine NN over **both** vector tables (unit-normalized embeddings put both models on a shared cosine scale), blended: `alpha × BM25 + (1-alpha) × cosine` (default `alpha=0.4`). Filename matches on the first query term get a 1.5× boost.
 3. **Auto-inject** — before every agent turn, the user's prompt is searched against the index and relevant chunks are appended after the prompt as a hidden `customType: "rag"` message (KV-cache friendly — the system prompt is unchanged across turns).
 4. **Auto-refresh** — if the index is older than 24 h, the `before_agent_start` hook re-walks tracked paths and re-indexes new/changed files in the background. Throttled to one stale check per hour.
@@ -207,3 +207,33 @@ SKIP_EMBEDDING_TESTS=1 npm test   # skip the real-ONNX semantic tests
 ```
 
 OCR end-to-end test is skipped when `tesseract` isn't installed.
+
+## Code layout
+
+```
+index.ts                    extension entry point (hooks + /rag command + tools) + public API re-exports
+src/constants.ts            shared constants: models, prefixes, extension groups, size limits
+src/runtime-utils.ts        event-loop yielding + stderr progress lines
+src/store-paths.ts          store-directory resolution, well-known paths, legacy migration
+src/config.ts               RagConfig persistence + extension-allowlist arithmetic
+src/hashing.ts              sha256 for text + streamed binary hashing
+src/repository.ts           every SQL statement, schema + embedding-model migrations
+src/database.ts             node:sqlite connection lifecycle, stats, legacy JSON migration, reset
+src/chunking.ts             allocation-conscious line-based chunkText
+src/file-discovery.ts       sync/async directory walkers, tracked-path expansion, exclusion matching
+src/text-extraction.ts      extractText (plain/pdf/docx/html) + OCR fallback
+src/embedding.ts            dual ONNX pipelines (nomic + jina-code), batched inference
+src/search.ts               hybrid BM25 + dual-vector search
+src/indexing.ts             indexFiles pipeline (parallel reads → per-model embed batches → tx writes)
+src/extension/              Pi wiring: progress UI, path display, hooks, /rag command, tools
+types/                      ambient type declarations for untyped dependencies
+vendor/                     dev-only vendored shims (see below)
+```
+
+## Requirements & dependency notes
+
+- **Node.js >= 24** — the database layer runs on the built-in `node:sqlite` driver (`DatabaseSync`), which also removes the deprecated `better-sqlite3` → `prebuild-install` install chain. `sqlite-vec` is loaded as a SQLite extension (`allowExtension`).
+- **PDF extraction** uses `unpdf` (a maintained `pdfjs-dist` wrapper) instead of the unmaintained `pdf-parse`.
+- `vendor/node-domexception-native/` — a 2-line dev-only re-export of the platform-native `DOMException`. Declared as a devDependency under the name `node-domexception`, so the nested `fetch-blob` copies in the Pi peer tree hoist onto it instead of fetching the dead registry package (which prints an install-time deprecation warning).
+- `vendor/pi-coding-agent-types/` — a types-only vendored copy of the Pi agent package. The published package ships an `npm-shrinkwrap.json` that freezes its subtree against root-level dependency resolution; since our imports from it are type-only, we vendor its `dist/*.d.ts` (rebuilt via `scripts/sync-peer-types.sh [version]`) so the dev tree stays normally resolvable.
+- `allowScripts` in `package.json` records the reviewed native install scripts (`onnxruntime-node`, `protobufjs`, `@google/genai`) so npm 11.19+ runs them automatically on fresh installs.

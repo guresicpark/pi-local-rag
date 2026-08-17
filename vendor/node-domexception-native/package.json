@@ -1,0 +1,7 @@
+{
+  "name": "node-domexception",
+  "version": "1.0.1",
+  "description": "Vendored drop-in replacement for the deprecated node-domexception@1.0.0. The upstream deprecation notice says to use the platform-native DOMException (a Node global since v18), so this package simply re-exports that global. Declared as a devDependency of pi-local-rag so the nested fetch-blob copies (inside the Pi peer-dependency tree) resolve to this stub by normal hoisting instead of fetching the dead registry package — which is what prints the install-time deprecation warning.",
+  "main": "index.js",
+  "license": "CC0-1.0"
+}

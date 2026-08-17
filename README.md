@@ -32,6 +32,7 @@ Local hybrid RAG pipeline for the [Pi coding agent](https://github.com/badlogic/
 - Auto-injected RAG context is visible in chat, collapsed to a single summary line
 - RAG injection defaults to **off** and auto-enables only once the store has chunks — at session start, or immediately after `/rag index`
 - Bare `/rag` toggles the stats widget on repeat calls (`/rag status` subcommand removed)
+- RAG results show **cwd-relative file paths** (`src/myfile.php`) instead of bare basenames — a hit in a subdirectory now resolves correctly instead of being reported as `./myfile.php`. Files indexed outside cwd fall back to their absolute path
 
 ## Features
 
@@ -125,12 +126,12 @@ $ /rag
 $ /rag search "stripe webhook signature verification"
 🔍 4 results for "stripe webhook signature verification"  hybrid BM25+vector
 
-payments.ts:142-187  score=0.92
+src/server/handlers/payments.ts:142-187  score=0.92
   export async function verifyStripeWebhook(req: Request) {
     const sig = req.headers.get("stripe-signature");
     if (!sig) throw new Error("missing signature header");
 
-webhooks.md:1-23  score=0.71
+docs/webhooks.md:1-23  score=0.71
   # Webhook signing
   All inbound webhooks are verified against the shared secret stored in
   STRIPE_WEBHOOK_SECRET. Stripe signs each request with a t= timestamp...
@@ -160,7 +161,7 @@ Embedding   ██████████████████████�
 The extension registers three tools the agent can call directly:
 
 - **`rag_index`** — Index a path into the pipeline (also adds it to tracked paths)
-- **`rag_query`** — Hybrid BM25 + vector search; returns file paths + line numbers + previews + scores
+- **`rag_query`** — Hybrid BM25 + vector search; returns cwd-relative file paths + line numbers + previews + scores
 - **`rag_status`** — Index stats, RAG config, storage path + scope
 
 ## How It Works

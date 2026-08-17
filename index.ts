@@ -110,6 +110,12 @@ function isUnderRoot(filePath: string, root: string): boolean {
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
+/** cwd-relative path for display (e.g. `src/myfile.php`); falls back to the
+ *  full path for files outside cwd so the model still gets a resolvable path. */
+function displayPath(filePath: string, cwd: string): string {
+  return isUnderRoot(filePath, cwd) ? relative(cwd, filePath) : filePath;
+}
+
 /**
  * Shared embed-progress UI for /rag index|rebuild: renders one line
  * per embedding model (code → jina, text → nomic) plus a combined bar, and
@@ -185,9 +191,10 @@ export default function (pi: ExtensionAPI) {
   const STALE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 
   // ── Auto-inject RAG context before every agent turn ──
-  pi.on("before_agent_start", async (event, _ctx) => {
+  pi.on("before_agent_start", async (event, ctx) => {
     const config = loadConfig();
     if (!config.ragEnabled) return;
+    const cwd = ctx.cwd ?? process.cwd();
 
     return withDb(async (database) => {
       const stats = getIndexStats(database);
@@ -212,7 +219,7 @@ export default function (pi: ExtensionAPI) {
       if (!relevant.length) return;
 
       const context = relevant.map(r =>
-        `### ${basename(r.chunk.file)} (lines ${r.chunk.lineStart}-${r.chunk.lineEnd})\n` +
+        `### ${displayPath(r.chunk.file, cwd)} (lines ${r.chunk.lineStart}-${r.chunk.lineEnd})\n` +
         `\`\`\`\n${r.chunk.content.slice(0, 600)}\n\`\`\``
       ).join("\n\n");
 
@@ -226,7 +233,7 @@ export default function (pi: ExtensionAPI) {
           : `${r.chunk.lineStart}-${r.chunk.lineEnd}`);
         byFile.set(r.chunk.file, ranges);
       }
-      const hits = [...byFile.entries()].map(([f, ranges]) => `${basename(f)}:${ranges.join(",")}`);
+      const hits = [...byFile.entries()].map(([f, ranges]) => `${displayPath(f, cwd)}:${ranges.join(",")}`);
       const summary =
         `Automatic RAG lookup provided ${relevant.length} search hit${relevant.length === 1 ? "" : "s"}: ` +
         `(${hits.join(", ")})`;
@@ -394,7 +401,7 @@ export default function (pi: ExtensionAPI) {
         ];
         for (const r of results) {
           lines.push(
-            th.fg("success", basename(r.chunk.file)) +
+            th.fg("success", displayPath(r.chunk.file, ctx.cwd ?? process.cwd())) +
             th.fg("muted", `:${r.chunk.lineStart}-${r.chunk.lineEnd}`) +
             "  " + th.fg("dim", `score=${r.hybrid.toFixed(2)}`)
           );
@@ -790,7 +797,7 @@ export default function (pi: ExtensionAPI) {
       query: Type.String({ description: "Search query" }),
       limit: Type.Optional(Type.Number({ description: "Max results (default 10)" })),
     }),
-    execute: async (_toolCallId, params) => {
+    execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
       const config = loadConfig();
       const outcome = await withDb(async (db) => {
         if (!getIndexStats(db).totalChunks) return { empty: true as const };
@@ -800,7 +807,7 @@ export default function (pi: ExtensionAPI) {
       if (outcome.empty) return { content: [{ type: "text" as const, text: "pi-local-rag index is empty. Run rag_index first." }], details: undefined };
       if (!outcome.results.length) return { content: [{ type: "text" as const, text: `No results for: ${params.query}` }], details: undefined };
       const text = JSON.stringify(outcome.results.map(r => ({
-        file: r.chunk.file,
+        file: displayPath(r.chunk.file, ctx.cwd ?? process.cwd()),
         lines: `${r.chunk.lineStart}-${r.chunk.lineEnd}`,
         tokens: r.chunk.tokens,
         scores: { bm25: r.bm25.toFixed(3), vector: r.vector.toFixed(3), hybrid: r.hybrid.toFixed(3) },

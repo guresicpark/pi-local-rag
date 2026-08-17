@@ -24,6 +24,12 @@ export const CODE_VECTOR_DIM = 768;
 export const CODE_QUERY_PREFIX = "";
 export const CODE_DOC_PREFIX = "";
 
+// Version of the code-document embedding *scheme* — i.e. how a chunk's text is
+// prepared before it goes into the code model (not which model). Bumping this
+// invalidates existing code vectors so they're re-embedded with the new scheme,
+// the same way a model-id change does. Prose vectors (nomic) are unaffected.
+export const CODE_EMBED_SCHEME = "file-context-v1";
+
 // ── File-extension groups ──
 
 /** Code extensions → embedded with CODE_EMBEDDING_MODEL (jina). */

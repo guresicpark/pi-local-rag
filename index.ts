@@ -63,7 +63,7 @@ import * as repo from "./repository.ts";
 // working (tests, downstream code that imports from the package root).
 export {
   DEFAULT_TEXT_EXTS, DEFAULT_CODE_EXTS, DEFAULT_DOC_EXTS, BINARY_DOC_EXTS,
-  EMBEDDING_MODEL, CODE_EMBEDDING_MODEL, MAX_LINE_CHARS, MAX_CHUNK_CHARS,
+  EMBEDDING_MODEL, CODE_EMBEDDING_MODEL, CODE_EMBED_SCHEME, MAX_LINE_CHARS, MAX_CHUNK_CHARS,
 } from "./constants.ts";
 export type { EmbedGroup } from "./constants.ts";
 export { getRagDir, GLOBAL_RAG_DIR, LEGACY_DIR } from "./store.ts";
@@ -78,7 +78,7 @@ export {
   sha256, chunkText, collectFiles, collectFilesAsync, collectFromTracked, collectFromTrackedAsync,
   isExcludedByConfig, extractText, getOcrTooling, isSparsePdfText,
 } from "./chunking.ts";
-export { embed, embedBatch, embedQueryFor, embedBatchFor, EMBED_MODELS, resolveModelCacheDir } from "./embed.ts";
+export { embed, embedBatch, embedQueryFor, embedBatchFor, EMBED_MODELS, buildQueryInput, buildDocumentInput, cleanQuery, resolveModelCacheDir } from "./embed.ts";
 export type { ScoredChunk } from "./search.ts";
 export { cosineSimilarity, normalize, hybridSearch } from "./search.ts";
 export { isIndexStale, indexFiles } from "./indexing.ts";

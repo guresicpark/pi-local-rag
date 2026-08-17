@@ -9,7 +9,7 @@ Local hybrid RAG pipeline for the [Pi coding agent](https://github.com/badlogic/
 **Embedding models**
 
 - Switched from `Xenova/all-MiniLM-L6-v2` (384-dim, ~23 MB) to `nomic-ai/nomic-embed-text-v1.5` (768-dim, q8, ~111 MB) with the required `search_query:` / `search_document:` task prefixes; existing stores auto-migrate
-- Dual-model embedding: code files → `jinaai/jina-embeddings-v2-base-code` (768-dim, ~170 MB), prose/data/docs → nomic; vectors in separate `sqlite-vec` tables, hybrid search embeds the query with both models and ranks by absolute cosine similarity (shared scale across spaces)
+- Dual-model embedding: code files → `jinaai/jina-embeddings-v2-base-code` (768-dim, ~170 MB), prose/data/docs → nomic; vectors in separate `sqlite-vec` tables, hybrid search embeds the query with both models and ranks by absolute cosine similarity (shared scale across spaces). Each model gets input tailored to its strength — nomic uses its asymmetric `search_query:`/`search_document:` prefixes, and code chunks are embedded with their file basename prepended (jina-code was trained on code-with-context pairs)
 - `/rag ext` commands now take an optional `[code|text]` group; new `extraCodeExtensions` config field
 
 **Reliability & security fixes**
@@ -165,7 +165,7 @@ The extension registers three tools the agent can call directly:
 
 ## How It Works
 
-1. **Index** — files are chunked (~50 lines each, broken at blank lines where possible), embedded by group (code extensions → `jinaai/jina-embeddings-v2-base-code`, everything else → `nomic-ai/nomic-embed-text-v1.5`; both 768-dim), and stored in SQLite. PDF/DOCX go through `pdf-parse`/`mammoth`; HTML is converted to Markdown via `turndown`; scanned PDFs fall back to OCR (`pdftoppm` + `tesseract`) when the system tools are installed.
+1. **Index** — files are chunked (~50 lines each, broken at blank lines where possible), embedded by group (code extensions → `jinaai/jina-embeddings-v2-base-code`, everything else → `nomic-ai/nomic-embed-text-v1.5`; both 768-dim), and stored in SQLite. Code chunks are embedded with their file basename prepended so the code model anchors filename-oriented queries; prose gets nomic's `search_document:` prefix. PDF/DOCX go through `pdf-parse`/`mammoth`; HTML is converted to Markdown via `turndown`; scanned PDFs fall back to OCR (`pdftoppm` + `tesseract`) when the system tools are installed.
 2. **Search** — FTS5 `bm25()` + `sqlite-vec` cosine NN over **both** vector tables (unit-normalized embeddings put both models on a shared cosine scale), blended: `alpha × BM25 + (1-alpha) × cosine` (default `alpha=0.4`). Filename matches on the first query term get a 1.5× boost.
 3. **Auto-inject** — before every agent turn, the user's prompt is searched against the index and relevant chunks are appended after the prompt as a hidden `customType: "rag"` message (KV-cache friendly — the system prompt is unchanged across turns).
 4. **Auto-refresh** — if the index is older than 24 h, the `before_agent_start` hook re-walks tracked paths and re-indexes new/changed files in the background. Throttled to one stale check per hour.

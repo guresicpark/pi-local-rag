@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import { EMBEDDING_MODEL, VECTOR_DIM, CODE_EMBEDDING_MODEL, CODE_VECTOR_DIM, DEFAULT_CODE_EXTS } from "./constants.ts";
+import { EMBEDDING_MODEL, VECTOR_DIM, CODE_EMBEDDING_MODEL, CODE_VECTOR_DIM, CODE_EMBED_SCHEME, DEFAULT_CODE_EXTS } from "./constants.ts";
 
 /**
  * Centralizes every raw SQL statement used across db.ts, indexing.ts,
@@ -106,15 +106,7 @@ export function initSchema(db: Database.Database) {
   const storedCodeModel = getMetadata(db, MetadataKey.EmbeddingCodeModel);
   if (storedCodeModel !== CODE_EMBEDDING_MODEL) {
     if (storedModel && countChunksTotal(db) > 0) {
-      const codeChunks = DEFAULT_CODE_EXTS.map(e => `file_path LIKE '%${e}'`).join(" OR ");
-      const codePaths = DEFAULT_CODE_EXTS.map(e => `path LIKE '%${e}'`).join(" OR ");
-      db.exec("DROP TABLE IF EXISTS chunks_vec_code;");
-      db.exec(`
-        DELETE FROM chunks_vec WHERE rowid IN (SELECT rowid FROM chunks WHERE ${codeChunks});
-        DELETE FROM chunks WHERE ${codeChunks};
-        DELETE FROM files WHERE ${codePaths};
-      `);
-      db.exec("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')");
+      resetCodeSpace(db);
       process.stderr.write(
         `[rag] code embedding model ${storedCodeModel ? `changed (${storedCodeModel} → ${CODE_EMBEDDING_MODEL})` : `set (${CODE_EMBEDDING_MODEL})`}; ` +
         `code files cleared — run /rag rebuild to re-embed them with the code model\n`,
@@ -125,6 +117,44 @@ export function initSchema(db: Database.Database) {
     );`);
     setMetadata(db, MetadataKey.EmbeddingCodeModel, CODE_EMBEDDING_MODEL);
   }
+
+  // Code-document embedding *scheme* change (how code chunks are prepared for
+  // the model, e.g. the filename-context header) — code vectors are
+  // incompatible even though the model id is unchanged, so code-classified
+  // files are cleared (prose/nomic vectors survive) and `/rag rebuild`
+  // re-embeds them. Mirrors the model-change wipe above.
+  const storedCodeScheme = getMetadata(db, MetadataKey.EmbeddingCodeScheme);
+  if (storedCodeScheme !== CODE_EMBED_SCHEME) {
+    if (storedModel && countChunksTotal(db) > 0) {
+      resetCodeSpace(db);
+      process.stderr.write(
+        `[rag] code embedding scheme ${storedCodeScheme ? `changed (${storedCodeScheme} → ${CODE_EMBED_SCHEME})` : `set (${CODE_EMBED_SCHEME})`}; ` +
+        `code files cleared — run /rag rebuild to re-embed them with the new scheme\n`,
+      );
+    }
+    setMetadata(db, MetadataKey.EmbeddingCodeScheme, CODE_EMBED_SCHEME);
+  }
+}
+
+/**
+ * Drop + recreate the code vector table and delete every code-classified
+ * file's chunks/vectors/files (FTS row rebuilt). Prose chunks + nomic vectors
+ * are left untouched. Used by both the code-model-change and code-scheme-change
+ * migrations.
+ */
+function resetCodeSpace(db: Database.Database) {
+  const codeChunks = DEFAULT_CODE_EXTS.map(e => `file_path LIKE '%${e}'`).join(" OR ");
+  const codePaths = DEFAULT_CODE_EXTS.map(e => `path LIKE '%${e}'`).join(" OR ");
+  db.exec("DROP TABLE IF EXISTS chunks_vec_code;");
+  db.exec(`
+    DELETE FROM chunks_vec WHERE rowid IN (SELECT rowid FROM chunks WHERE ${codeChunks});
+    DELETE FROM chunks WHERE ${codeChunks};
+    DELETE FROM files WHERE ${codePaths};
+  `);
+  db.exec("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')");
+  db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec_code USING vec0(
+    embedding float[${CODE_VECTOR_DIM}]
+  );`);
 }
 
 // ─── Chunks ──────────────────────────────────────────────────────────────
@@ -375,6 +405,7 @@ export const MetadataKey = {
   LastBuild: "last_build",
   EmbeddingModel: "embedding_model",
   EmbeddingCodeModel: "embedding_model_code",
+  EmbeddingCodeScheme: "embedding_code_scheme",
 } as const;
 
 export type MetadataKey = typeof MetadataKey[keyof typeof MetadataKey];

@@ -1,6 +1,6 @@
 {
   "name": "pi-local-rag",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Local hybrid RAG pipeline for the Pi coding agent. SQLite FTS5 + sqlite-vec, dual ONNX embeddings via Transformers.js (jina-embeddings-v2-base-code for source code, nomic-embed-text-v1.5 for prose), PDF/DOCX/HTML extraction (with OCR fallback), per-project storage, auto-injection. Zero cloud dependency.",
   "type": "module",
   "main": "./index.ts",

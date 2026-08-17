@@ -1,7 +1,7 @@
 import { basename } from "node:path";
 import Database from "better-sqlite3";
 import { getDbConn, type IndexStats } from "./db.ts";
-import { EMBEDDING_MODEL, CODE_EMBEDDING_MODEL, type EmbedGroup } from "./constants.ts";
+import { EMBEDDING_MODEL, CODE_EMBEDDING_MODEL, CODE_EMBED_SCHEME, type EmbedGroup } from "./constants.ts";
 import { embedBatchFor } from "./embed.ts";
 import { chunkText, extractText, sha256 } from "./chunking.ts";
 import { classifyFile, loadConfig } from "./config.ts";
@@ -235,7 +235,7 @@ export async function indexFiles(
         const vectors = await embedBatchFor(g, texts, {
           onProgress: done => progress?.onEmbed?.(p + done, groupTotal, g),
           onModelLoad: model => progress?.onModelLoad?.(g, model),
-        });
+        }, slice.map(x => x.fw.fp));
         insertSlice(slice, vectors);
         // The slice is durable — drop its chunk contents (which pin their
         // parent file text) and close out any file whose last chunk just
@@ -261,6 +261,7 @@ export async function indexFiles(
     repo.setMetadata(database, repo.MetadataKey.LastBuild, new Date().toISOString());
     repo.setMetadata(database, repo.MetadataKey.EmbeddingModel, EMBEDDING_MODEL);
     repo.setMetadata(database, repo.MetadataKey.EmbeddingCodeModel, CODE_EMBEDDING_MODEL);
+    repo.setMetadata(database, repo.MetadataKey.EmbeddingCodeScheme, CODE_EMBED_SCHEME);
 
     return { indexed: toIndex.length, chunks: chunked, chunksByGroup, skipped, durationMs: Date.now() - startMs };
   } finally {

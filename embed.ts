@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, basename } from "node:path";
 import { homedir } from "node:os";
 import {
   EMBEDDING_MODEL, QUERY_PREFIX, DOC_PREFIX,
@@ -18,6 +18,49 @@ export const EMBED_MODELS: Record<EmbedGroup, ModelSpec> = {
   text: { id: EMBEDDING_MODEL, queryPrefix: QUERY_PREFIX, docPrefix: DOC_PREFIX },
   code: { id: CODE_EMBEDDING_MODEL, queryPrefix: CODE_QUERY_PREFIX, docPrefix: CODE_DOC_PREFIX },
 };
+
+/** Normalize a query before embedding: trim + collapse runs of whitespace to a
+ *  single space. Queries come straight from the user's prompt and can carry
+ *  stray newlines/indentation that dilute the embedding (and, downstream, the
+ *  FTS tokenization). */
+export function cleanQuery(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * The exact input text a model expects for a QUERY, encoding each model's
+ * special capability:
+ *
+ * - text (nomic-embed-text-v1.5): asymmetric retrieval — queries get the
+ *   `search_query:` task prefix, documents `search_document:`. These two are
+ *   deliberately different so nomic can place short questions and long
+ *   passages in aligned-but-distinct regions of its space.
+ * - code (jina-embeddings-v2-base-code): symmetric, no task prefix (jina v2
+ *   added none — those arrived with v3). Its code-search training maps natural
+ *   language straight to code, so the raw question is already the ideal query.
+ */
+export function buildQueryInput(group: EmbedGroup, text: string): string {
+  return EMBED_MODELS[group].queryPrefix + cleanQuery(text);
+}
+
+/**
+ * The exact input text a model expects for a DOCUMENT chunk, encoding each
+ * model's special capability:
+ *
+ * - text (nomic): `search_document:` prefix; prose is self-describing, so no
+ *   extra context is injected.
+ * - code (jina): no prefix, but the file basename is prepended as a context
+ *   line. jina-code was trained on code-with-context pairs (docstring/question
+ *   → code), and a bare ~50-line slice loses its file identity otherwise;
+ *   prepending the basename anchors filename-oriented queries ("what does
+ *   auth.ts do?") into the vector space without touching the stored chunk
+ *   content or FTS text.
+ */
+export function buildDocumentInput(group: EmbedGroup, text: string, filename?: string): string {
+  const spec = EMBED_MODELS[group];
+  const content = group === "code" && filename ? `${basename(filename)}\n${text}` : text;
+  return spec.docPrefix + content;
+}
 
 /**
  * Persistent HuggingFace model cache directory.
@@ -72,9 +115,8 @@ export async function getEmbedder(group: EmbedGroup = "text"): Promise<any> {
 
 /** Embed a search query with a specific group's model. */
 export async function embedQueryFor(group: EmbedGroup, text: string): Promise<number[]> {
-  const spec = EMBED_MODELS[group];
   const embedder = await getEmbedder(group);
-  const output = await embedder(spec.queryPrefix + text, { pooling: "mean", normalize: true });
+  const output = await embedder(buildQueryInput(group, text), { pooling: "mean", normalize: true });
   return Array.from(output.data as Float32Array);
 }
 
@@ -119,6 +161,7 @@ export async function embedBatchFor(
   group: EmbedGroup,
   texts: string[],
   opts: EmbedBatchOpts = {},
+  fileNames?: (string | undefined)[],
 ): Promise<Float32Array[]> {
   if (texts.length === 0) return [];
   // Notify only on a true cold start: pipeline not yet loaded in this
@@ -127,7 +170,6 @@ export async function embedBatchFor(
   if (!_pipelines.has(group) && !isModelCached(EMBED_MODELS[group].id)) {
     opts.onModelLoad?.(EMBED_MODELS[group].id);
   }
-  const spec = EMBED_MODELS[group];
   const embedder = await getEmbedder(group);
   const results: Float32Array[] = new Array(texts.length);
 
@@ -135,8 +177,12 @@ export async function embedBatchFor(
     const batch = texts.slice(start, start + BATCH_SIZE);
     // Pass the whole batch in a single forward pass — the model returns a
     // Tensor with dims [batchSize, dim]. Documents get the group's doc
-    // prefix (nomic task instruction; jina v2 uses none).
-    const output = await embedder(batch.map(t => spec.docPrefix + t), { pooling: "mean", normalize: true });
+    // prefix (nomic task instruction; jina v2 uses none) plus, for code
+    // chunks, the file basename as a context header.
+    const output = await embedder(
+      batch.map((t, i) => buildDocumentInput(group, t, fileNames?.[start + i])),
+      { pooling: "mean", normalize: true },
+    );
     const flat = output.data as Float32Array;
     const dim = flat.length / batch.length; // 768 for both current models
 

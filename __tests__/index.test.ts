@@ -47,6 +47,10 @@ import {
   normalize,
   DEFAULT_TEXT_EXTS,
   CODE_EMBEDDING_MODEL,
+  CODE_EMBED_SCHEME,
+  buildQueryInput,
+  buildDocumentInput,
+  cleanQuery,
   normalizeExt,
   resolveExtensions,
   resolveCodeExtensions,
@@ -251,6 +255,31 @@ describe("normalize", () => {
   });
 });
 
+// ─── model-aware query/document input formatting ────────────────────────────
+
+describe("buildQueryInput / buildDocumentInput / cleanQuery", () => {
+  it("cleanQuery collapses whitespace and trims", () => {
+    expect(cleanQuery("  how   do\n  leaves\tproduce food  ")).toBe("how do leaves produce food");
+  });
+
+  it("text query uses the nomic search_query prefix; code query uses none", () => {
+    expect(buildQueryInput("text", "  hello\nworld ")).toBe("search_query: hello world");
+    expect(buildQueryInput("code", "  hello\nworld ")).toBe("hello world");
+  });
+
+  it("text document uses search_document prefix and is left untouched", () => {
+    expect(buildDocumentInput("text", "Photosynthesis is how plants convert light."))
+      .toBe("search_document: Photosynthesis is how plants convert light.");
+  });
+
+  it("code document prepends the file basename as context; text does not", () => {
+    expect(buildDocumentInput("code", "export const x = 1;", "/src/auth.ts"))
+      .toBe("auth.ts\nexport const x = 1;");
+    expect(buildDocumentInput("code", "export const x = 1;")).toBe("export const x = 1;");
+    expect(buildDocumentInput("text", "Some prose.", "/docs/readme.md")).toBe("search_document: Some prose.");
+  });
+});
+
 // ─── extensions ─────────────────────────────────────────────────────────────
 
 describe("normalizeExt", () => {
@@ -406,6 +435,47 @@ describe("initSchema: dual-model migration", () => {
     seedLegacyStore(db);
     initSchema(db); // metadata already recorded by the first initSchema
     expect((db.prepare("SELECT COUNT(*) AS n FROM chunks").get() as { n: number }).n).toBe(2);
+    db.close();
+  });
+
+  it("changing the code embedding scheme clears code files but keeps prose vectors", () => {
+    const db = new Database(":memory:");
+    db.pragma("journal_mode = WAL");
+    loadVec(db);
+    initSchema(db);
+
+    const insChunk = db.prepare(`
+      INSERT INTO chunks(id, file_path, chunk_content, line_start, line_end, chunk_hash, indexed_at, tokens)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const insVec = db.prepare("INSERT INTO chunks_vec(rowid, embedding) VALUES (CAST(? AS INTEGER), ?)");
+    const insCodeVec = db.prepare("INSERT INTO chunks_vec_code(rowid, embedding) VALUES (CAST(? AS INTEGER), ?)");
+    const insFile = db.prepare(`
+      INSERT OR REPLACE INTO files(path, hash, chunks, indexed, size, embedded)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    const vec = new Float32Array(768).fill(0.1);
+    // Code chunk (a.ts) → chunks_vec_code; prose chunk (notes.md) → chunks_vec.
+    for (const [id, fp, code] of [["c-1", "/src/a.ts", true], ["c-2", "/src/notes.md", false]] as const) {
+      const r = insChunk.run(id, fp, "content", 1, 1, "h", "2026-05-15T00:00:00Z", 1);
+      (code ? insCodeVec : insVec).run(Number(r.lastInsertRowid), Buffer.from(vec.buffer, vec.byteOffset, vec.byteLength));
+      insFile.run(fp, "h", 1, "2026-05-15T00:00:00Z", 7, 1);
+    }
+    // Dual-model metadata present, but the code embedding scheme is stale/absent.
+    db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES ('embedding_model', 'nomic-ai/nomic-embed-text-v1.5')").run();
+    db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES ('embedding_model_code', ?)").run(CODE_EMBEDDING_MODEL);
+    db.exec("DELETE FROM metadata WHERE key='embedding_code_scheme'");
+    expect((db.prepare("SELECT COUNT(*) AS n FROM chunks").get() as { n: number }).n).toBe(2);
+
+    initSchema(db);
+
+    const paths = (db.prepare("SELECT file_path FROM chunks").all() as Array<{ file_path: string }>).map(r => r.file_path);
+    expect(paths).toEqual(["/src/notes.md"]);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM chunks_vec").get() as { n: number }).n).toBe(1);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM chunks_vec_code").get() as { n: number }).n).toBe(0);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM files").get() as { n: number }).n).toBe(1);
+    const scheme = db.prepare("SELECT value FROM metadata WHERE key='embedding_code_scheme'").get() as { value: string };
+    expect(scheme.value).toBe(CODE_EMBED_SCHEME);
     db.close();
   });
 });

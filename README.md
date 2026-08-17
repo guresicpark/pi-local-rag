@@ -2,6 +2,31 @@
 
 Local hybrid RAG pipeline for the [Pi coding agent](https://github.com/badlogic/pi-mono). Index your local files and search them with BM25 + vector similarity — **zero cloud dependency, works fully offline**.
 
+> **Fork notice**: this is a fork of [vahidkowsari/pi-local-rag](https://github.com/vahidkowsari/pi-local-rag), diverged at upstream `v0.4.1`. See [What differs from upstream](#what-differs-from-upstream) below.
+
+## What differs from upstream
+
+**Embedding models**
+
+- Switched from `Xenova/all-MiniLM-L6-v2` (384-dim, ~23 MB) to `nomic-ai/nomic-embed-text-v1.5` (768-dim, q8, ~111 MB) with the required `search_query:` / `search_document:` task prefixes; existing stores auto-migrate
+- Dual-model embedding: code files → `jinaai/jina-embeddings-v2-base-code` (768-dim, ~170 MB), prose/data/docs → nomic; vectors in separate `sqlite-vec` tables, hybrid search embeds the query with both models and ranks by absolute cosine similarity (shared scale across spaces)
+- `/rag ext` commands now take an optional `[code|text]` group; new `extraCodeExtensions` config field
+
+**Reliability & security fixes**
+
+- Chunk-size caps (`MAX_LINE_CHARS=1000`, `MAX_CHUNK_CHARS≈4000`) — one minified/base64 line could previously produce a ~500 KB chunk whose 8192-token padding blew up the ONNX attention batch and froze indexing
+- `/rag clear` was a no-op upstream (never wiped the SQLite index) — now factory-resets the entire store directory and regenerates fresh defaults
+- All 17 `npm audit` vulnerabilities fixed via dependency `overrides` (`adm-zip`, `onnxruntime-node`, `sharp`)
+- HF model cache pinned to a shared global directory (no per-project re-downloads)
+- Singleton DB closed via `closeDbConn()` in `before_agent_start`; extension entrypoint migrated to the refactored DB/repository API
+
+**UX**
+
+- Live per-batch embedding progress during `/rag index|rebuild|refresh`, with one progress line per model and a `⏳ Loading …` notification before first-run model downloads (only when weights are actually missing from the disk cache)
+- Auto-injected RAG context is visible in chat, collapsed to a single summary line
+- RAG injection auto-enables at startup when the cwd's store already has indexed chunks
+- Bare `/rag` toggles the stats widget on repeat calls (`/rag status` subcommand removed)
+
 ## Features
 
 - **Hybrid BM25 + vector search** — SQLite FTS5 for keyword scoring, [`sqlite-vec`](https://github.com/asg017/sqlite-vec) for 768-dim cosine NN, blended at retrieval time

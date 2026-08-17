@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
 
 - **`/rag clear` factory reset**: in addition to clearing the index, `/rag clear` now deletes every file in the active store directory (`.pi/rag/` project store or `~/.pi/rag/` global — `rag.db`, WAL/SHM sidecars, `config.json`, legacy `index.json`, anything else) and regenerates fresh defaults: a default `config.json` and an empty schema-initialized `rag.db`. Tracked paths, exclude patterns, and custom config are no longer preserved across a clear. New `resetStore()` export (db.ts / package root); `clearIndex()` remains available for index-only wipes.
 - **Dual embedding models (code vs. prose)**: file extensions are split into two groups. Code files (`.ts`, `.py`, `.rs`, `.css`, `.tf`, … — `DEFAULT_CODE_EXTS`) are embedded by `jinaai/jina-embeddings-v2-base-code` (768-dim, q8 ONNX, ~170 MB, no task prefixes); everything else (`.md`, `.txt`, `.html`, `.json`, `.yaml`, PDF/DOCX, … — `DEFAULT_DOC_EXTS`) keeps `nomic-ai/nomic-embed-text-v1.5`. Vectors live in separate `sqlite-vec` tables (`chunks_vec` text / `chunks_vec_code` code); `hybridSearch` embeds the query with both models and only loads a model when its table has vectors. Migration on first open clears code-classified files (prose chunks and their nomic vectors survive) — run `/rag rebuild` to re-embed code files with the code model.

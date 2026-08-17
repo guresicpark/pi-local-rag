@@ -28,7 +28,7 @@ Local hybrid RAG pipeline for the [Pi coding agent](https://github.com/badlogic/
 
 **UX**
 
-- Live per-batch embedding progress during `/rag index|rebuild|refresh`, with one progress line per model and a `⏳ Loading …` notification before first-run model downloads (only when weights are actually missing from the disk cache)
+- Live per-batch embedding progress during `/rag index|rebuild`, with one progress line per model and a `⏳ Loading …` notification before first-run model downloads (only when weights are actually missing from the disk cache)
 - Auto-injected RAG context is visible in chat, collapsed to a single summary line
 - RAG injection defaults to **off** and auto-enables only once the store has chunks — at session start, or immediately after `/rag index`
 - Bare `/rag` toggles the stats widget on repeat calls (`/rag status` subcommand removed)
@@ -40,17 +40,11 @@ Local hybrid RAG pipeline for the [Pi coding agent](https://github.com/badlogic/
 - **Many file formats** — text, source code, Markdown, JSON, YAML, plus PDF (with optional OCR fallback for scanned docs), DOCX, HTML (auto-converted to Markdown)
 - **Per-project storage** — walks up from cwd looking for `.pi/rag/`; falls back to `~/.pi/rag/` global store
 - **Tracked paths + exclude patterns** — `/rag index <path>` remembers what to keep current; gitignore-style `/rag exclude` for `dist/`, `*.log`, etc.
-- **Auto-refresh** — stale index (>24 h) silently refreshed before the next agent turn; manual `/rag refresh` for on-demand incremental updates
+- **Auto-refresh** — stale index (>24 h) silently refreshed before the next agent turn; re-running `/rag index` on an already-indexed path refreshes it incrementally on demand
 - **Auto-injection** — relevant chunks appended after the user prompt before every agent turn (KV-cache friendly); off by default, auto-enables once the store has chunks
 - **3 AI tools** — `rag_index`, `rag_query`, `rag_status` for the agent to call directly
 
 ## Install
-
-```bash
-pi install npm:pi-local-rag
-```
-
-Or via git:
 
 ```bash
 pi install git:github.com/guresicpark/pi-local-rag
@@ -72,12 +66,11 @@ The OCR fallback is silent when these tools aren't installed (logs one stderr hi
 
 | Command | Description |
 |---|---|
-| `/rag index <path>` | Index a file or directory (chunks → embeds → stores); adds the path to tracked paths |
+| `/rag index <path>` | Index a file or directory (chunks → embeds → stores) and add it to tracked paths. If the path already has indexed chunks, re-walks tracked paths and refreshes new/changed files instead |
 | `/rag search <query>` | Hybrid BM25 + vector search over the index |
 | `/rag find <glob>` | List indexed files matching a glob (e.g. `*.ts`, `src/*`) |
 | `/rag` | Show index stats, active config, tracked paths, exclude patterns, storage scope (run again to hide) |
 | `/rag rebuild [--force]` | Re-walk tracked paths and re-embed all files. `--force` wipes the DB and bypasses the hash-cache check |
-| `/rag refresh` | Incremental refresh — only new/changed files (same code path as the 24 h auto-refresh) |
 | `/rag clear` | Factory-reset the store: delete every file in the active store dir (`.pi/rag/` or `~/.pi/rag/`) and regenerate fresh defaults (default `config.json` + empty `rag.db`). Tracked paths and custom config are wiped |
 | `/rag exclude <pattern>` | Add a gitignore-style exclude pattern; `/rag exclude -<pattern>` to remove; no arg to list |
 | `/rag ext list` | Show the extension groups and which model embeds each |
@@ -202,7 +195,7 @@ Auto-injection is **off by default**. It turns itself on only when the store act
 | `extraExtensions` | `[]` | Extra text-group extensions to index beyond the defaults |
 | `extraCodeExtensions` | `[]` | Extra code-group extensions (embedded by the code model) |
 | `excludeExtensions` | `[]` | Default extensions to skip (applies to both groups) |
-| `trackedPaths` | `[]` | Absolute paths that `/rag rebuild`/`refresh` re-walk |
+| `trackedPaths` | `[]` | Absolute paths that `/rag rebuild` re-walks and `/rag index` refreshes |
 | `excludePatterns` | `[]` | Gitignore-style patterns applied when walking tracked paths |
 
 ## Testing

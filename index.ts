@@ -14,11 +14,10 @@
  * `/rag index` in a directory with no parent store creates one at cwd.
  *
  * /rag                  → show index stats (toggle)
- * /rag index <path>     → index + embed a file or directory
+ * /rag index <path>     → index a new path; refresh paths that already have chunks
  * /rag search <query>   → hybrid search (BM25 + vector)
  * /rag find <glob>      → list indexed files matching a glob
  * /rag rebuild          → re-embed all tracked files (forced re-embed)
- * /rag refresh          → incremental refresh (only new/changed files)
  * /rag clear            → clear index + reset the store to fresh defaults
  * /rag exclude <pat>    → add gitignore-style pattern (use -<pat> to remove; omit arg to list)
  * /rag on|off           → toggle auto-injection
@@ -105,8 +104,14 @@ function storeScope(ragDir: string): "global" | "project" {
   return ragDir === GLOBAL_RAG_DIR() ? "global" : "project";
 }
 
+/** True when `filePath` is `root` itself or nested beneath it. */
+function isUnderRoot(filePath: string, root: string): boolean {
+  const rel = relative(root, filePath);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
 /**
- * Shared embed-progress UI for /rag index|rebuild|refresh: renders one line
+ * Shared embed-progress UI for /rag index|rebuild: renders one line
  * per embedding model (code → jina, text → nomic) plus a combined bar, and
  * notifies when a model is about to be downloaded (a cold cache can stall
  * for minutes with no other visual feedback).
@@ -135,8 +140,8 @@ function makeEmbedProgress(ctx: { ui: RagUi }, verb: string) {
 }
 
 /**
- * Shared file/embed/save progress UI for /rag index|rebuild|refresh. The
- * three commands differ only in the active verb and the per-file "done"
+ * Shared file/embed/save progress UI for /rag index|rebuild. The
+ * two commands differ only in the active verb and the per-file "done"
  * label, so the callback bundle is built once and parameterized.
  */
 function makeIndexProgress(ctx: { ui: RagUi }, verb: string, doneLabel: string) {
@@ -279,11 +284,10 @@ export default function (pi: ExtensionAPI) {
    *  /rag toggles: show on first call, hide on the next. */
   let statusWidgetVisible = false;
   const RAG_SUBCOMMANDS: { value: string; label: string; description: string }[] = [
-    { value: "index",    label: "index",    description: "Index a file or directory" },
+    { value: "index",    label: "index",    description: "Index a new path, or refresh paths that already have chunks" },
     { value: "search",   label: "search",   description: "Search the index" },
     { value: "find",     label: "find",     description: "List indexed files matching a glob" },
     { value: "rebuild",  label: "rebuild",  description: "Re-embed tracked files (--force to skip hash check + wipe DB)" },
-    { value: "refresh",  label: "refresh",  description: "Incremental refresh — new/changed files only" },
     { value: "clear",    label: "clear",    description: "Clear the index and reset the store to defaults" },
     { value: "exclude",  label: "exclude",  description: "Manage gitignore-style exclude patterns" },
     { value: "ext",      label: "ext",      description: "Manage indexable file-extension allowlist" },
@@ -293,7 +297,7 @@ export default function (pi: ExtensionAPI) {
   ];
 
   pi.registerCommand("rag", {
-    description: "pi-local-rag: /rag (status)|index|search|find|rebuild [--force]|refresh|clear|exclude|on|off|ext",
+    description: "pi-local-rag: /rag (status)|index|search|find|rebuild [--force]|clear|exclude|on|off|ext",
     getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
       const filtered = RAG_SUBCOMMANDS
         .filter((s) => s.value.startsWith(prefix))
@@ -304,7 +308,7 @@ export default function (pi: ExtensionAPI) {
       const parts = (args || "").trim().split(/\s+/);
       const cmd = parts[0] || "";
 
-      // ── index ──
+      // ── index (also refreshes already-indexed tracked paths) ──
       if (cmd === "index") {
         const path = parts[1] || ".";
         if (!existsSync(path)) { ctx.ui.notify(`Path not found: ${path}`, "error"); return; }
@@ -316,14 +320,36 @@ export default function (pi: ExtensionAPI) {
           config.trackedPaths.push(absPath);
           saveConfig(config);
         }
-        const files = collectFiles(absPath, undefined, config.excludePatterns);
-        if (!files.length) { ctx.ui.notify(`No indexable files found in: ${path}`, "warning"); return; }
 
-        const total = files.length;
-        ctx.ui.notify(`Found ${total} files to index`, "info");
+        // First time this path is seen there are no chunks under it — do a
+        // normal index. Once chunks exist for the tracked path, `/rag index`
+        // acts as an incremental refresh: it re-walks every tracked path and
+        // only re-embeds new/changed files.
+        const alreadyIndexed = await withDb(db =>
+          getIndexedPaths(db).some(f => isUnderRoot(f, absPath)),
+        );
+
+        let files: string[];
+        let verb: string;
+        let doneLabel: string;
+        if (!alreadyIndexed) {
+          files = collectFiles(absPath, undefined, config.excludePatterns);
+          if (!files.length) { ctx.ui.notify(`No indexable files found in: ${path}`, "warning"); return; }
+          verb = "Indexing";
+          doneLabel = "chunked";
+          ctx.ui.notify(`Found ${files.length} files to index`, "info");
+        } else {
+          files = config.trackedPaths.length
+            ? collectFromTracked(config)
+            : await withDb(db => getIndexedPaths(db).filter(f => existsSync(f)));
+          if (!files.length) { ctx.ui.notify("No tracked files to refresh.", "warning"); return; }
+          verb = "Refreshing";
+          doneLabel = "new/changed";
+          ctx.ui.notify(`Refreshing ${files.length} files...`, "info");
+        }
 
         const { result, enabledNow } = await withDb(async (db) => {
-          const result = await indexFiles(files, makeIndexProgress(ctx, "Indexing", "chunked"), db);
+          const result = await indexFiles(files, makeIndexProgress(ctx, verb, doneLabel), db);
           // ragEnabled defaults to false; flip it on as soon as the store
           // actually has chunks (mirrors the session_start auto-enable).
           const enabledNow = !config.ragEnabled && getIndexStats(db).totalChunks > 0;
@@ -335,7 +361,10 @@ export default function (pi: ExtensionAPI) {
 
         const secs = (result.durationMs / 1000).toFixed(1);
         const scope = storeScope(getRagDir());
-        ctx.ui.notify(`✅ Indexed ${result.indexed} files (${result.chunks} chunks: ${result.chunksByGroup.code} code · ${result.chunksByGroup.text} text) · ${result.skipped} unchanged · ${secs}s · tracking ${config.trackedPaths.length} path(s) · ${scope} store`, "info");
+        const summary = alreadyIndexed
+          ? `✅ Refreshed ${result.indexed} new/changed · ${result.skipped} unchanged · ${result.chunks} chunks (${result.chunksByGroup.code} code · ${result.chunksByGroup.text} text) · ${secs}s`
+          : `✅ Indexed ${result.indexed} files (${result.chunks} chunks: ${result.chunksByGroup.code} code · ${result.chunksByGroup.text} text) · ${result.skipped} unchanged · ${secs}s · tracking ${config.trackedPaths.length} path(s) · ${scope} store`;
+        ctx.ui.notify(summary, "info");
 
         if (enabledNow) {
           config.ragEnabled = true;
@@ -457,29 +486,6 @@ export default function (pi: ExtensionAPI) {
         } catch (err) {
           ctx.ui.notify(`Rebuild failed: ${(err as Error).message}`, "error");
         }
-        return;
-      }
-
-      // ── refresh (on-demand equivalent of the 24h auto-refresh) ──
-      if (cmd === "refresh") {
-        const config = loadConfig();
-        const files = config.trackedPaths.length
-          ? collectFromTracked(config)
-          : await withDb(db => getIndexedPaths(db).filter(f => existsSync(f)));
-        if (!files.length) {
-          ctx.ui.notify("No tracked files to refresh. Run /rag index <path> first.", "warning");
-          return;
-        }
-
-        ctx.ui.notify(`Refreshing ${files.length} files...`, "info");
-
-        const result = await withDb(db => indexFiles(files, makeIndexProgress(ctx, "Refreshing", "new/changed"), db));
-
-        ctx.ui.setStatus("rag", undefined);
-        ctx.ui.setWidget("rag", undefined);
-
-        const secs = (result.durationMs / 1000).toFixed(1);
-        ctx.ui.notify(`✅ Refreshed ${result.indexed} new/changed · ${result.skipped} unchanged · ${result.chunks} chunks (${result.chunksByGroup.code} code · ${result.chunksByGroup.text} text) · ${secs}s`, "info");
         return;
       }
 
@@ -643,12 +649,11 @@ export default function (pi: ExtensionAPI) {
       if (cmd === "help") {
         const pad = (s: string, n: number) => s + " ".repeat(Math.max(0, n - s.length));
         const cmds: [string, string][] = [
-          ["/rag index <path>",       "Index a file or directory (chunks, embeds, stores)"],
+          ["/rag index <path>",       "Index a new path, or refresh paths that already have chunks"],
           ["/rag search <query>",     "Hybrid BM25 + vector search over the index"],
           ["/rag find <glob>",        "List indexed files matching a glob (e.g. *.ts, src/*)"],
           ["/rag",                    "Show index stats and active configuration (toggle)"],
           ["/rag rebuild [--force]",  "Re-embed tracked files; --force wipes DB and bypasses hash skip"],
-          ["/rag refresh",            "Incremental refresh — only new/changed files (also fires automatically every 24h)"],
           ["/rag clear",              "Wipe the index and reset the store (config + DB) to fresh defaults"],
           ["/rag exclude <pattern>",  "Add a gitignore-style exclude pattern (omit to list; -<pattern> to remove)"],
           ["/rag ext list",            "Show extension groups (code → jina, text → nomic)"],

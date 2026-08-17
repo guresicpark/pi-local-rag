@@ -67,8 +67,6 @@ export function getRagDir(opts: { createIfMissing?: boolean } = {}): string {
 export function dbFile(ragDir: string): string { return join(ragDir, "rag.db"); }
 /** Legacy JSON index, kept for the one-shot auto-migration in getFreshDbConn. */
 export function legacyIndexFile(ragDir: string): string { return join(ragDir, "index.json"); }
-/** @deprecated use dbFile/legacyIndexFile. Kept temporarily for callers that still reach for the JSON path. */
-export function indexFile(ragDir: string): string { return join(ragDir, "index.json"); }
 export function configFile(ragDir: string): string { return join(ragDir, "config.json"); }
 
 export function ensureDir(ragDir: string) {

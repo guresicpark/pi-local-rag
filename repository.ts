@@ -209,57 +209,70 @@ export function float32ToBuffer(arr: number[] | Float32Array): Buffer {
   return Buffer.from(f.buffer, f.byteOffset, f.byteLength);
 }
 
-export function insertVector(db: Database.Database, rowid: number, vector: number[] | Float32Array) {
-  db.prepare("INSERT INTO chunks_vec(rowid, embedding) VALUES (CAST(? AS INTEGER), ?)")
-    .run(rowid, float32ToBuffer(vector));
-}
-
-export function deleteVectorsForFile(db: Database.Database, filePath: string) {
-  db.prepare("DELETE FROM chunks_vec WHERE rowid IN (SELECT rowid FROM chunks WHERE file_path = ?)").run(filePath);
-}
-
 export interface VecMatch {
   rowid: number;
   distance: number
 }
 
-export function searchVectors(db: Database.Database, queryVec: number[], limit: number): VecMatch[] {
+type VecTable = "chunks_vec" | "chunks_vec_code";
+
+function insertVectorInto(db: Database.Database, table: VecTable, rowid: number, vector: number[] | Float32Array) {
+  db.prepare(`INSERT INTO ${table}(rowid, embedding) VALUES (CAST(? AS INTEGER), ?)`)
+    .run(rowid, float32ToBuffer(vector));
+}
+
+function deleteVectorsForFileFrom(db: Database.Database, table: VecTable, filePath: string) {
+  db.prepare(`DELETE FROM ${table} WHERE rowid IN (SELECT rowid FROM chunks WHERE file_path = ?)`).run(filePath);
+}
+
+function searchVectorsIn(db: Database.Database, table: VecTable, queryVec: number[], limit: number): VecMatch[] {
   return db.prepare(`
     SELECT rowid, distance
-    FROM chunks_vec
+    FROM ${table}
     WHERE embedding MATCH ?
     LIMIT ?
   `).bind(float32ToBuffer(queryVec), limit).all() as VecMatch[];
 }
 
+function countVectorsIn(db: Database.Database, table: VecTable): number {
+  const row = db.prepare(`SELECT COUNT(*) as c FROM ${table}`).get() as { c: number };
+  return row.c;
+}
+
+// ─── Text vectors (chunks_vec / nomic) ───────────────────────────────────
+
+export function insertVector(db: Database.Database, rowid: number, vector: number[] | Float32Array) {
+  insertVectorInto(db, "chunks_vec", rowid, vector);
+}
+
+export function deleteVectorsForFile(db: Database.Database, filePath: string) {
+  deleteVectorsForFileFrom(db, "chunks_vec", filePath);
+}
+
+export function searchVectors(db: Database.Database, queryVec: number[], limit: number): VecMatch[] {
+  return searchVectorsIn(db, "chunks_vec", queryVec, limit);
+}
+
 export function getEmbeddedCount(db: Database.Database): number {
-  const row = db.prepare("SELECT COUNT(*) as embeddedCount FROM chunks_vec").get() as { embeddedCount: number };
-  return row.embeddedCount;
+  return countVectorsIn(db, "chunks_vec");
 }
 
 // ─── Code vectors (chunks_vec_code / jina) ───────────────────────────────
 
 export function insertCodeVector(db: Database.Database, rowid: number, vector: number[] | Float32Array) {
-  db.prepare("INSERT INTO chunks_vec_code(rowid, embedding) VALUES (CAST(? AS INTEGER), ?)")
-    .run(rowid, float32ToBuffer(vector));
+  insertVectorInto(db, "chunks_vec_code", rowid, vector);
 }
 
 export function deleteCodeVectorsForFile(db: Database.Database, filePath: string) {
-  db.prepare("DELETE FROM chunks_vec_code WHERE rowid IN (SELECT rowid FROM chunks WHERE file_path = ?)").run(filePath);
+  deleteVectorsForFileFrom(db, "chunks_vec_code", filePath);
 }
 
 export function searchCodeVectors(db: Database.Database, queryVec: number[], limit: number): VecMatch[] {
-  return db.prepare(`
-    SELECT rowid, distance
-    FROM chunks_vec_code
-    WHERE embedding MATCH ?
-    LIMIT ?
-  `).bind(float32ToBuffer(queryVec), limit).all() as VecMatch[];
+  return searchVectorsIn(db, "chunks_vec_code", queryVec, limit);
 }
 
 export function getCodeEmbeddedCount(db: Database.Database): number {
-  const row = db.prepare("SELECT COUNT(*) as embeddedCount FROM chunks_vec_code").get() as { embeddedCount: number };
-  return row.embeddedCount;
+  return countVectorsIn(db, "chunks_vec_code");
 }
 
 export function clearAllVectors(db: Database.Database) {
@@ -290,11 +303,6 @@ export interface FileRow {
   indexed: string;
   size: number;
   embedded: number;
-}
-
-export function getFile(db: Database.Database, path: string): { hash?: string; embedded?: number } | undefined {
-  return db.prepare("SELECT hash, embedded FROM files WHERE path = ?").get(path) as
-    { hash?: string; embedded?: number } | undefined;
 }
 
 /** Bulk {path → hash/embedded} lookup for indexFiles' producer-side skip

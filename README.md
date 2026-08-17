@@ -23,7 +23,7 @@ Local hybrid RAG pipeline for the [Pi coding agent](https://github.com/badlogic/
 - `/rag clear` was a no-op upstream (never wiped the SQLite index) — now factory-resets the entire store directory and regenerates fresh defaults
 - All 17 `npm audit` vulnerabilities fixed via dependency `overrides` (`adm-zip`, `onnxruntime-node`, `sharp`)
 - HF model cache pinned to a shared global directory (no per-project re-downloads)
-- Singleton DB closed via `closeDbConn()` in `before_agent_start`; extension entrypoint migrated to the refactored DB/repository API
+- Singleton DB connection scoped to every request path — a new `withDb()` helper opens the shared connection, runs the handler, and closes it in a `finally` (also on throw); the `/rag` command handlers and the `rag_*` tools previously opened the connection via `getDbConn()` and never closed it, leaking the open handle (and WAL file descriptor) across turns
 
 **UX**
 

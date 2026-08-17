@@ -53,8 +53,6 @@ export class RagDatabase {
     return RagDatabase._instance ??= RagDatabase.open();
   }
 
-  static get isOpen(): boolean { return RagDatabase._instance !== null; }
-
   static close(): void {
     const db = RagDatabase._instance;
     RagDatabase._instance = null;
@@ -95,6 +93,21 @@ export class RagDatabase {
 
 export const getDbConn   = () => RagDatabase.instance;
 export const closeDbConn = () => { RagDatabase.close(); };
+
+/**
+ * Run `fn` against the shared DB connection and close it afterwards (also on
+ * throw), so the singleton never leaks an open handle — or the WAL / file
+ * descriptor backing it — across agent turns. This is the one place that
+ * should pair getDbConn() with closeDbConn().
+ */
+export async function withDb<T>(fn: (db: Database.Database) => T | Promise<T>): Promise<T> {
+  const db = getDbConn();
+  try {
+    return await fn(db);
+  } finally {
+    closeDbConn();
+  }
+}
 
 /** @deprecated Use getDbConn() (singleton) or getFreshDbConn() (throwaway). */
 export const openDb = (dir?: string) => RagDatabase.open(dir);
@@ -198,8 +211,8 @@ export function resetStore(): string {
   return dir;
 }
 
-export function loadIndex(): IndexMeta {
-  const db = getDbConn();
+export function loadIndex(dbArg?: Database.Database): IndexMeta {
+  const db = dbArg ?? getDbConn();
   const chunks = repo.getAllChunks(db) as Chunk[];
 
   const filesRaw = repo.listFiles(db);
@@ -215,11 +228,12 @@ export function loadIndex(): IndexMeta {
   };
 }
 
-export function getEmbeddedCount(): number {
-  const db = getDbConn();
-  return repo.getEmbeddedCount(db);
+export function getIndexedFiles(dbArg?: Database.Database): repo.FileRow[] {
+  return repo.listFiles(dbArg ?? getDbConn());
 }
 
-export function getIndexedFiles(): repo.FileRow[] {
-  return repo.listFiles(getDbConn());
+/** Just the indexed file paths — cheaper than loadIndex(), which also
+ *  materializes every chunk's content string. */
+export function getIndexedPaths(dbArg?: Database.Database): string[] {
+  return repo.listFiles(dbArg ?? getDbConn()).map(f => f.path);
 }

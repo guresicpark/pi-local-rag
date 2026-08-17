@@ -196,16 +196,10 @@ export function chunkText(text: string, maxLines = 50): { content: string; lineS
   return chunks;
 }
 
-export function collectFiles(
-  dirPath: string,
-  exts?: Set<string>,
-  excludePatterns: string[] = [],
-): string[] {
-  const allowed = exts ?? resolveExtensions(loadConfig());
-  const ig = excludePatterns.length ? ignore().add(excludePatterns) : null;
-  const files: string[] = [];
-  const root = dirPath;
-
+/** Shared extension/size + exclude-pattern filter for the sync and async
+ *  walkers — keeps `acceptable` and `isExcluded` defined once instead of
+ *  being copy-pasted into collectFiles and collectFilesAsync. */
+function makeFileFilter(allowed: Set<string>, ig: ReturnType<typeof ignore> | null, root: string) {
   function acceptable(fp: string, size: number): boolean {
     const ext = extname(fp).toLowerCase();
     if (allowed.has(ext)) return size < TEXT_MAX_BYTES;
@@ -219,6 +213,20 @@ export function collectFiles(
     if (!rel || rel.startsWith("..")) return false;
     return ig.ignores(rel);
   }
+
+  return { acceptable, isExcluded };
+}
+
+export function collectFiles(
+  dirPath: string,
+  exts?: Set<string>,
+  excludePatterns: string[] = [],
+): string[] {
+  const allowed = exts ?? resolveExtensions(loadConfig());
+  const ig = excludePatterns.length ? ignore().add(excludePatterns) : null;
+  const files: string[] = [];
+  const root = dirPath;
+  const { acceptable, isExcluded } = makeFileFilter(allowed, ig, root);
 
   try {
     const stat = statSync(dirPath);
@@ -277,20 +285,7 @@ export async function collectFilesAsync(
   const ig = excludePatterns.length ? ignore().add(excludePatterns) : null;
   const files: string[] = [];
   const root = dirPath;
-
-  function acceptable(fp: string, size: number): boolean {
-    const ext = extname(fp).toLowerCase();
-    if (allowed.has(ext)) return size < TEXT_MAX_BYTES;
-    if (BINARY_DOC_EXTS.has(ext)) return size < BINARY_DOC_MAX_BYTES;
-    return false;
-  }
-
-  function isExcluded(absPath: string): boolean {
-    if (!ig) return false;
-    const rel = relative(root, absPath);
-    if (!rel || rel.startsWith("..")) return false;
-    return ig.ignores(rel);
-  }
+  const { acceptable, isExcluded } = makeFileFilter(allowed, ig, root);
 
   try {
     const st = await fsPromises.stat(dirPath);

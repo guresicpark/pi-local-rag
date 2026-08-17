@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.1
+
+- **1.5–2× faster chunking** (perf): `chunkText()` is the CPU hot spot of indexing Phase 1 — 32 concurrent producer workers call it once per file, so on large stores the chunker dominates the read phase. Rows now live in parallel arrays (`rowTexts`/`rowNums`) instead of one `{text, line}` object per line, and the split of pathologically long lines into `MAX_LINE_CHARS` segments is built lazily: when no line exceeds the cap (the overwhelmingly common case) the row arrays alias `lines` directly and the expansion pass is skipped entirely. Blank-line boundary detection and the min-content filter use allocation-free character scans (`isBlankRow`/`trimLenGT`, matching `String.prototype.trim`'s exact whitespace set) instead of `trim()`, which was allocating a trimmed copy of up to 14 rows per chunk in the boundary search plus every ~4 KB chunk for the content filter — effectively a second full pass over the text in throwaway strings. Chunk assembly drops the intermediate `.map(r => r.text)` array and joins the slice directly. Output is byte-identical, verified by a 2,008-case randomized differential test against the previous implementation (mixed long/minified/blank/at-cap lines + edge cases) plus the existing vitest suite. GC-controlled benchmarks (`--expose-gc`, alternating order): 100.7→58.9 ms on a 2.6 MB source file, 21.1→13.8 ms on prose, 20.3→10.2 ms on minified content.
+
 ## 0.7.0
 
 - **RAG auto-injection now defaults to `off`** (`ragEnabled: false` in fresh configs and after `/rag clear`). Injection is enabled only when the store actually has chunks: at session start when the cwd's store has indexed files (as before), and now also immediately after a successful `/rag index` / `rag_index` run that leaves chunks in the store. Existing stores with `ragEnabled: true` saved in `config.json` keep their setting; `/rag on|off` still toggles manually. README and tests updated for the new default.

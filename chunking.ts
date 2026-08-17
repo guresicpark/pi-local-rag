@@ -15,38 +15,79 @@ export function sha256(data: string): string {
   return createHash("sha256").update(data).digest("hex").slice(0, 12);
 }
 
+/** True for the exact character set String.prototype.trim removes
+ *  (WhiteSpace + LineTerminator per spec). */
+function isTrimWs(c: number): boolean {
+  return c === 32 || (c >= 9 && c <= 13) || c === 0xa0 || c === 0xfeff || c === 0x2028 || c === 0x2029;
+}
+
+/** `s.trim() === ""` without the trimmed-copy allocation — exits at the
+ *  first non-whitespace char, which for code lines is usually char 0. */
+function isBlankRow(s: string): boolean {
+  for (let i = 0; i < s.length; i++) if (!isTrimWs(s.charCodeAt(i))) return false;
+  return true;
+}
+
+/** `s.trim().length > n` without allocating the trimmed copy. */
+function trimLenGT(s: string, n: number): boolean {
+  let f = 0;
+  const L = s.length;
+  while (f < L && isTrimWs(s.charCodeAt(f))) f++;
+  if (f === L) return false;
+  let l = L - 1;
+  while (l > f && isTrimWs(s.charCodeAt(l))) l--;
+  return l - f + 1 > n;
+}
+
 export function chunkText(text: string, maxLines = 50): { content: string; lineStart: number; lineEnd: number }[] {
   const lines = text.split("\n");
   const chunks: { content: string; lineStart: number; lineEnd: number }[] = [];
 
   // Split pathologically long lines (minified JS/JSON, CSV rows, base64
   // blobs) into MAX_LINE_CHARS segments. Segments of one source line share
-  // that line's number so references stay accurate.
-  const rows: { text: string; line: number }[] = [];
+  // that line's number so references stay accurate. Rows live in parallel
+  // arrays (text + source line) instead of one object per row, and are
+  // built lazily: when no line exceeds the cap (the common case) rows map
+  // 1:1 onto `lines` and the expansion is skipped entirely.
+  let rowTexts: string[] = lines;
+  let rowNums: number[] | null = null;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (line.length <= MAX_LINE_CHARS) { rows.push({ text: line, line: i + 1 }); continue; }
+    if (line.length <= MAX_LINE_CHARS) {
+      if (rowNums) { rowTexts.push(line); rowNums.push(i + 1); }
+      continue;
+    }
+    if (!rowNums) {
+      rowTexts = lines.slice(0, i);
+      rowNums = Array.from({ length: i }, (_, k) => k + 1);
+    }
     for (let s = 0; s < line.length; s += MAX_LINE_CHARS) {
-      rows.push({ text: line.slice(s, s + MAX_LINE_CHARS), line: i + 1 });
+      rowTexts.push(line.slice(s, s + MAX_LINE_CHARS));
+      rowNums.push(i + 1);
     }
   }
+  const rowCount = rowTexts.length;
 
   let i = 0;
-  while (i < rows.length) {
-    let end = Math.min(i + maxLines, rows.length);
+  while (i < rowCount) {
+    let end = Math.min(i + maxLines, rowCount);
     for (let j = end - 1; j > i + 10 && j > end - 15; j--) {
-      if (rows[j]?.text.trim() === "") { end = j + 1; break; }
+      if (isBlankRow(rowTexts[j])) { end = j + 1; break; }
     }
     // Shrink the window further if the joined content would exceed
     // MAX_CHUNK_CHARS (≈1k tokens — the embedding model's sweet spot).
-    let len = rows[i].text.length;
+    let len = rowTexts[i].length;
     for (let j = i + 1; j < end; j++) {
-      len += 1 + rows[j].text.length;
+      len += 1 + rowTexts[j].length;
       if (len > MAX_CHUNK_CHARS) { end = j; break; }
     }
-    const chunk = rows.slice(i, end).map(r => r.text).join("\n");
-    if (chunk.trim().length > 20) {
-      chunks.push({ content: chunk, lineStart: rows[i].line, lineEnd: rows[end - 1].line });
+    const chunk = rowTexts.slice(i, end).join("\n");
+    if (trimLenGT(chunk, 20)) {
+      chunks.push({
+        content: chunk,
+        lineStart: rowNums ? rowNums[i] : i + 1,
+        lineEnd: rowNums ? rowNums[end - 1] : end,
+      });
     }
     i = end;
   }

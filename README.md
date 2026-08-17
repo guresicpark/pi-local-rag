@@ -15,6 +15,7 @@ Local hybrid RAG pipeline for the [Pi coding agent](https://github.com/badlogic/
 **Reliability & security fixes**
 
 - Chunk-size caps (`MAX_LINE_CHARS=1000`, `MAX_CHUNK_CHARS≈4000`) — one minified/base64 line could previously produce a ~500 KB chunk whose 8192-token padding blew up the ONNX attention batch and froze indexing
+- 1.5–2× faster chunking — `chunkText()` (the CPU hot spot of indexing's read phase) uses lazy row expansion, allocation-free whitespace scans, and single-join chunk assembly, with byte-identical output
 - `/rag clear` was a no-op upstream (never wiped the SQLite index) — now factory-resets the entire store directory and regenerates fresh defaults
 - All 17 `npm audit` vulnerabilities fixed via dependency `overrides` (`adm-zip`, `onnxruntime-node`, `sharp`)
 - HF model cache pinned to a shared global directory (no per-project re-downloads)

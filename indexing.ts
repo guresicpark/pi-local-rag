@@ -41,7 +41,7 @@ interface FileWork {
   size: number;
   group: EmbedGroup;
   rawChunks: { content: string; lineStart: number; lineEnd: number; hash: string }[];
-  _vectors?: number[][];
+  _vectors?: Float32Array[];
 }
 
 export async function indexFiles(

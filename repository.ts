@@ -197,15 +197,19 @@ export function getAllChunks(db: Database.Database): LoadedChunk[] {
 
 /**
  * Internal only — not part of the module's public surface. Vector params
- * come in as `number[]`; every caller converts through this before it
- * touches chunks_vec.
+ * come in as `number[]` or `Float32Array` (the embedBatchFor fast path);
+ * every caller converts through this before it touches chunks_vec.
  **/
-export function float32ToBuffer(arr: number[]): Buffer {
+export function float32ToBuffer(arr: number[] | Float32Array): Buffer {
+  // Float32Array: Buffer.view over the existing store — zero copy. Safe to
+  // share: better-sqlite3 copies the bytes into its statement binding at
+  // run() time, so the source array is reusable afterwards.
+  if (arr instanceof Float32Array) return Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength);
   const f = new Float32Array(arr);
   return Buffer.from(f.buffer, f.byteOffset, f.byteLength);
 }
 
-export function insertVector(db: Database.Database, rowid: number, vector: number[]) {
+export function insertVector(db: Database.Database, rowid: number, vector: number[] | Float32Array) {
   db.prepare("INSERT INTO chunks_vec(rowid, embedding) VALUES (CAST(? AS INTEGER), ?)")
     .run(rowid, float32ToBuffer(vector));
 }
@@ -235,7 +239,7 @@ export function getEmbeddedCount(db: Database.Database): number {
 
 // ─── Code vectors (chunks_vec_code / jina) ───────────────────────────────
 
-export function insertCodeVector(db: Database.Database, rowid: number, vector: number[]) {
+export function insertCodeVector(db: Database.Database, rowid: number, vector: number[] | Float32Array) {
   db.prepare("INSERT INTO chunks_vec_code(rowid, embedding) VALUES (CAST(? AS INTEGER), ?)")
     .run(rowid, float32ToBuffer(vector));
 }

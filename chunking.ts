@@ -47,26 +47,43 @@ function trimLenGT(s: string, n: number): boolean {
   return trimLenGTRange(s, 0, s.length, n);
 }
 
+/**
+ * One indexOf("\n") scan recording line-start offsets — indexOf walks the
+ * string with SIMD memchr and, unlike text.split("\n"), materializes no
+ * per-line strings. Line j spans [starts[j], starts[j+1] - 1), the last
+ * line to text.length.
+ *
+ * Offsets live in an Int32Array (4 B/line): a plain number[] stores each
+ * offset as an 8-byte tagged SMI (Node builds don't enable pointer
+ * compression) and its geometric growth leaves dead backing stores for the
+ * GC. Files are capped at TEXT_MAX_BYTES, so offsets always fit int32.
+ * Kept as its own small function so it optimizes cleanly, away from the
+ * branchier chunk-assembly loops below.
+ */
+function scanLines(text: string): { starts: Int32Array; lineCount: number; hasLongLine: boolean } {
+  let buf = new Int32Array(1024);
+  let n = 1; // buf[0] = 0 via zero-initialization
+  let hasLongLine = false;
+  let prev = 0;
+  let p = text.indexOf("\n");
+  while (p !== -1) {
+    if (p - prev > MAX_LINE_CHARS) hasLongLine = true;
+    prev = p + 1;
+    if (n === buf.length) {
+      const grown = new Int32Array(buf.length * 2);
+      grown.set(buf);
+      buf = grown;
+    }
+    buf[n++] = prev;
+    p = text.indexOf("\n", prev);
+  }
+  if (text.length - prev > MAX_LINE_CHARS) hasLongLine = true;
+  return { starts: buf, lineCount: n, hasLongLine };
+}
+
 export function chunkText(text: string, maxLines = 50): { content: string; lineStart: number; lineEnd: number }[] {
   const chunks: { content: string; lineStart: number; lineEnd: number }[] = [];
-
-  // Scan line boundaries once — indexOf walks the string with SIMD memchr
-  // and, unlike text.split("\n"), materializes no per-line strings. Line j
-  // spans [starts[j], starts[j+1] - 1), the last line to text.length.
-  const starts: number[] = [0];
-  let hasLongLine = false;
-  {
-    let prev = 0;
-    let p = text.indexOf("\n");
-    while (p !== -1) {
-      if (p - prev > MAX_LINE_CHARS) hasLongLine = true;
-      prev = p + 1;
-      starts.push(prev);
-      p = text.indexOf("\n", prev);
-    }
-    if (text.length - prev > MAX_LINE_CHARS) hasLongLine = true;
-  }
-  const lineCount = starts.length;
+  const { starts, lineCount, hasLongLine } = scanLines(text);
   const endOf = (j: number): number => (j + 1 < lineCount ? starts[j + 1] - 1 : text.length);
 
   if (!hasLongLine) {
@@ -103,17 +120,24 @@ export function chunkText(text: string, maxLines = 50): { content: string; lineS
   // no longer contiguous in `text` (segments of one line are joined by
   // injected newlines), so rows are materialized and joined as before.
   const rowTexts: string[] = [];
-  const rowNums: number[] = [];
+  let rowNums = new Int32Array(1024); // 4 B/row, same rationale as `starts`
+  const pushRow = (t: string, n: number) => {
+    if (rowTexts.length === rowNums.length) {
+      const grown = new Int32Array(rowNums.length * 2);
+      grown.set(rowNums);
+      rowNums = grown;
+    }
+    rowNums[rowTexts.length] = n;
+    rowTexts.push(t);
+  };
   for (let j = 0; j < lineCount; j++) {
     const s = starts[j];
     const e = endOf(j);
     if (e - s <= MAX_LINE_CHARS) {
-      rowTexts.push(text.substring(s, e));
-      rowNums.push(j + 1);
+      pushRow(text.substring(s, e), j + 1);
     } else {
       for (let k = s; k < e; k += MAX_LINE_CHARS) {
-        rowTexts.push(text.substring(k, Math.min(k + MAX_LINE_CHARS, e)));
-        rowNums.push(j + 1);
+        pushRow(text.substring(k, Math.min(k + MAX_LINE_CHARS, e)), j + 1);
       }
     }
   }

@@ -146,7 +146,7 @@ describe("embedQueryFor('code') (real ONNX, jina-embeddings-v2-base-code)", () =
     `);
     const insVec = db.prepare("INSERT INTO chunks_vec(rowid, embedding) VALUES (CAST(? AS INTEGER), ?)");
     const insCodeVec = db.prepare("INSERT INTO chunks_vec_code(rowid, embedding) VALUES (CAST(? AS INTEGER), ?)");
-    const insert = async (c: { content: string; file: string }, vector: number[], codeVec: boolean) => {
+    const insert = async (c: { content: string; file: string }, vector: number[] | Float32Array, codeVec: boolean) => {
       const r = insChunk.run(
         `${c.file}-1`, c.file, c.content, 1, 1, sha256(c.content),
         "2026-05-15T00:00:00Z", Math.ceil(c.content.length / 4),

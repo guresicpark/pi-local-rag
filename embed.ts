@@ -106,6 +106,12 @@ export interface EmbedBatchOpts {
  * inference — one forward pass per BATCH_SIZE texts (~BATCH_SIZE× speedup
  * on CPU). The output Tensor has dims [batchSize, dim]; sliced per-text.
  *
+ * Vectors come back as Float32Array (4 B/element) — half the memory of the
+ * boxed number[] this used to return, and zero-copy into sqlite-vec's float
+ * blob at insert time (float32ToBuffer). For a 14k-chunk store that's
+ * ~100 MB of retained JS heap → ~44 MB of external backing stores held
+ * between the embed phase and the DB write.
+ *
  * `onProgress` fires after each batch with the cumulative count so the TUI
  * can render a smooth progress bar; `onModelLoad` fires once per model.
  */
@@ -113,7 +119,7 @@ export async function embedBatchFor(
   group: EmbedGroup,
   texts: string[],
   opts: EmbedBatchOpts = {},
-): Promise<number[][]> {
+): Promise<Float32Array[]> {
   if (texts.length === 0) return [];
   // Notify only on a true cold start: pipeline not yet loaded in this
   // process AND weights missing from the on-disk cache. A warm disk cache
@@ -123,7 +129,7 @@ export async function embedBatchFor(
   }
   const spec = EMBED_MODELS[group];
   const embedder = await getEmbedder(group);
-  const results: number[][] = new Array(texts.length);
+  const results: Float32Array[] = new Array(texts.length);
 
   for (let start = 0; start < texts.length; start += BATCH_SIZE) {
     const batch = texts.slice(start, start + BATCH_SIZE);
@@ -135,7 +141,10 @@ export async function embedBatchFor(
     const dim = flat.length / batch.length; // 768 for both current models
 
     for (let j = 0; j < batch.length; j++) {
-      results[start + j] = Array.from(flat.subarray(j * dim, (j + 1) * dim));
+      // slice(), not subarray() — subarray would alias the tensor's backing
+      // store, pinning the whole [batch × dim] buffer while any one of its
+      // vectors is still unwritten.
+      results[start + j] = flat.slice(j * dim, (j + 1) * dim);
     }
 
     opts.onProgress?.(Math.min(start + batch.length, texts.length), texts.length);
@@ -150,6 +159,6 @@ export async function embedBatchFor(
 export async function embedBatch(
   texts: string[],
   onProgress?: (i: number, total: number) => void,
-): Promise<number[][]> {
+): Promise<Float32Array[]> {
   return embedBatchFor("text", texts, { onProgress });
 }

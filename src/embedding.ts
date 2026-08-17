@@ -144,8 +144,14 @@ export async function embed(text: string): Promise<number[]> {
   return embedQueryFor("text", text);
 }
 
-/** Default number of texts per single ONNX forward pass. */
-export const BATCH_SIZE = 64;
+/**
+ * Default number of texts per single ONNX forward pass. Kept moderate: a
+ * batch is padded to its longest member, so oversized batches of long code
+ * chunks turn into one multi-minute pass with no progress tick until it
+ * completes (the run looks stuck). 16 bounds per-pass wall time while still
+ * amortizing tokenizer/session overhead.
+ */
+export const BATCH_SIZE = 16;
 
 /** Progress/callback hooks for batch embedding. */
 export interface EmbedBatchOpts {

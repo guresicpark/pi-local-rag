@@ -53,7 +53,7 @@ pi install npm:pi-local-rag
 Or via git:
 
 ```bash
-pi install git:github.com/vahidkowsari/pi-local-rag
+pi install git:github.com/guresicpark/pi-local-rag
 ```
 
 Optional: install `pdftoppm` (poppler) + `tesseract` with `eng`/`jpn` traineddata to enable OCR fallback for image-only PDFs.

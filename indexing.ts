@@ -66,7 +66,15 @@ export async function indexFiles(
     const CONCURRENCY = 32;
     const YIELD_INTERVAL = 64;
 
-    interface ReadResult { fp: string; hash: string; size: number; raw: { content: string; lineStart: number; lineEnd: number }[] }
+    // Producer-side skip cache: {path → stored hash/embedded} for every
+    // requested path, loaded once before the workers start. Producers
+    // consult it right after extractText (hash already in hand) and skip
+    // chunkText for unchanged + already-embedded files — previously the
+    // skip decision happened only in drainReads, after the chunking CPU had
+    // already been spent and discarded on every re-index.
+    const existingFiles = force ? undefined : repo.getFilesByPaths(database, paths);
+
+    interface ReadResult { fp: string; hash: string; size: number; raw: { content: string; lineStart: number; lineEnd: number }[] | null }
 
     const readQueue: ReadResult[] = [];
     let readQueueDone = false;
@@ -86,8 +94,9 @@ export async function indexFiles(
           if (i >= paths.length) { producersDone++; if (producersDone >= workerCount) { readQueueDone = true; notifyRead(); } return; }
           try {
             const { text, hash, size } = await extractText(paths[i]);
-            const raw = chunkText(text);
-            readQueue.push({ fp: paths[i], hash, size, raw });
+            const existing = existingFiles?.get(paths[i]);
+            const unchanged = existing !== undefined && existing.hash === hash && !!existing.embedded;
+            readQueue.push({ fp: paths[i], hash, size, raw: unchanged ? null : chunkText(text) });
             notifyRead();
           } catch {
             readErrorCount++;
@@ -108,8 +117,9 @@ export async function indexFiles(
         processedCount++;
         const name = basename(r.fp);
 
-        const existing = repo.getFile(database, r.fp);
-        if (!force && existing?.hash === r.hash && existing?.embedded) {
+        // Skip decision was made in the producer (hash match + embedded):
+        // raw is null and no chunking was spent on this file.
+        if (r.raw === null) {
           skipped++;
           progress?.onFile?.(processedCount, total, name, skipped);
           continue;

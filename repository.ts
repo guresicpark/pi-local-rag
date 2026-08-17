@@ -297,6 +297,23 @@ export function getFile(db: Database.Database, path: string): { hash?: string; e
     { hash?: string; embedded?: number } | undefined;
 }
 
+/** Bulk {path → hash/embedded} lookup for indexFiles' producer-side skip
+ *  check — one prepared statement, one query per path, no result-object
+ *  overhead for paths absent from the store. */
+export function getFilesByPaths(
+  db: Database.Database,
+  paths: string[],
+): Map<string, { hash: string; embedded: number }> {
+  const out = new Map<string, { hash: string; embedded: number }>();
+  if (paths.length === 0) return out;
+  const stmt = db.prepare("SELECT path, hash, embedded FROM files WHERE path = ?");
+  for (const p of paths) {
+    const row = stmt.get(p) as { path: string; hash: string; embedded: number } | undefined;
+    if (row) out.set(row.path, { hash: row.hash, embedded: row.embedded });
+  }
+  return out;
+}
+
 export function upsertFile(
   db: Database.Database,
   path: string, hash: string, chunks: number, indexed: string, size: number, embedded: boolean,

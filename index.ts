@@ -318,6 +318,14 @@ export default function (pi: ExtensionAPI) {
         const ragDir = getRagDir();
         const scope = ragDir === GLOBAL_RAG_DIR() ? "global" : "project";
         ctx.ui.notify(`✅ Indexed ${result.indexed} files (${result.chunks} chunks: ${result.chunksByGroup.code} code · ${result.chunksByGroup.text} text) · ${result.skipped} unchanged · ${secs}s · tracking ${config.trackedPaths.length} path(s) · ${scope} store`, "info");
+
+        // ragEnabled defaults to false; flip it on as soon as the store
+        // actually has chunks (mirrors the session_start auto-enable).
+        if (!config.ragEnabled && getIndexStats(getDbConn()).totalChunks > 0) {
+          config.ragEnabled = true;
+          saveConfig(config);
+          ctx.ui.notify("RAG auto-injection enabled", "info");
+        }
         return;
       }
 
@@ -775,7 +783,13 @@ export default function (pi: ExtensionAPI) {
       if (!files.length) return { content: [{ type: "text" as const, text: `No indexable files found in: ${params.path}` }], details: undefined };
       const result = await indexFiles(files, {});
       process.stderr.write(`\n`);
-      return { content: [{ type: "text" as const, text: `Indexed ${result.indexed} files (${result.chunks} chunks, embeddings generated). ${result.skipped} unchanged. ${(result.durationMs / 1000).toFixed(1)}s` }], details: undefined };
+      // Enable auto-injection now that chunks exist (default is off).
+      const enabledNow = !config.ragEnabled && getIndexStats().totalChunks > 0;
+      if (enabledNow) {
+        config.ragEnabled = true;
+        saveConfig(config);
+      }
+      return { content: [{ type: "text" as const, text: `Indexed ${result.indexed} files (${result.chunks} chunks, embeddings generated). ${result.skipped} unchanged. ${(result.durationMs / 1000).toFixed(1)}s${enabledNow ? " · RAG auto-injection enabled" : ""}` }], details: undefined };
     },
   });
 

@@ -24,7 +24,7 @@ Local hybrid RAG pipeline for the [Pi coding agent](https://github.com/badlogic/
 
 - Live per-batch embedding progress during `/rag index|rebuild|refresh`, with one progress line per model and a `⏳ Loading …` notification before first-run model downloads (only when weights are actually missing from the disk cache)
 - Auto-injected RAG context is visible in chat, collapsed to a single summary line
-- RAG injection auto-enables at startup when the cwd's store already has indexed chunks
+- RAG injection defaults to **off** and auto-enables only once the store has chunks — at session start, or immediately after `/rag index`
 - Bare `/rag` toggles the stats widget on repeat calls (`/rag status` subcommand removed)
 
 ## Features
@@ -35,7 +35,7 @@ Local hybrid RAG pipeline for the [Pi coding agent](https://github.com/badlogic/
 - **Per-project storage** — walks up from cwd looking for `.pi/rag/`; falls back to `~/.pi/rag/` global store
 - **Tracked paths + exclude patterns** — `/rag index <path>` remembers what to keep current; gitignore-style `/rag exclude` for `dist/`, `*.log`, etc.
 - **Auto-refresh** — stale index (>24 h) silently refreshed before the next agent turn; manual `/rag refresh` for on-demand incremental updates
-- **Auto-injection** — relevant chunks appended after the user prompt before every agent turn (KV-cache friendly)
+- **Auto-injection** — relevant chunks appended after the user prompt before every agent turn (KV-cache friendly); off by default, auto-enables once the store has chunks
 - **3 AI tools** — `rag_index`, `rag_query`, `rag_status` for the agent to call directly
 
 ## Install
@@ -185,11 +185,11 @@ Legacy `~/.pi/lens/` directories are renamed to `~/.pi/rag/` on first run; legac
 
 ## Configuration
 
-Auto-injection is on by default. Config lives in `<ragDir>/config.json`:
+Auto-injection is **off by default**. It turns itself on only when the store actually has indexed chunks — at session start or right after `/rag index` — and `/rag on` / `/rag off` toggle it manually. Config lives in `<ragDir>/config.json`:
 
 | Setting | Default | Description |
 |---|---|---|
-| `ragEnabled` | `true` | Auto-inject context before each turn |
+| `ragEnabled` | `false` | Auto-inject context before each turn (auto-enabled once the store has chunks) |
 | `ragTopK` | `5` | Max chunks to inject |
 | `ragScoreThreshold` | `0.1` | Min hybrid score to include |
 | `ragAlpha` | `0.4` | BM25/vector blend (0 = pure vector, 1 = pure BM25) |

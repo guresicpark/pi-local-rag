@@ -1111,7 +1111,7 @@ describe("Storage (loadConfig/saveConfig/loadIndex/saveIndex/ensureDir)", () => 
 
   it("loadConfig: returns defaults when no config file exists", () => {
     const cfg = loadConfig();
-    expect(cfg.ragEnabled).toBe(true);
+    expect(cfg.ragEnabled).toBe(false);
     expect(cfg.ragTopK).toBe(5);
     expect(cfg.ragScoreThreshold).toBe(0.1);
     expect(cfg.ragAlpha).toBe(0.4);
@@ -1146,14 +1146,14 @@ describe("Storage (loadConfig/saveConfig/loadIndex/saveIndex/ensureDir)", () => 
     writeFileSync(join(ragDir, "config.json"), JSON.stringify({ ragTopK: 99 }));
     const cfg = loadConfig();
     expect(cfg.ragTopK).toBe(99);
-    expect(cfg.ragEnabled).toBe(true);
+    expect(cfg.ragEnabled).toBe(false);
     expect(cfg.ragAlpha).toBe(0.4);
   });
 
   it("loadConfig: malformed JSON falls back to defaults instead of throwing", () => {
     writeFileSync(join(ragDir, "config.json"), "{not valid json");
     const cfg = loadConfig();
-    expect(cfg.ragEnabled).toBe(true);
+    expect(cfg.ragEnabled).toBe(false);
     expect(cfg.ragTopK).toBe(5);
   });
 
@@ -1300,7 +1300,7 @@ describe("Storage (loadConfig/saveConfig/loadIndex/saveIndex/ensureDir)", () => 
 
     // Config is back to defaults.
     const cfg = mod.loadConfig();
-    expect(cfg.ragEnabled).toBe(true);
+    expect(cfg.ragEnabled).toBe(false);
     expect(cfg.ragTopK).toBe(5);
     expect(cfg.trackedPaths).toEqual([]);
     expect(cfg.excludePatterns).toEqual([]);
@@ -1631,6 +1631,9 @@ describe("before_agent_start: 24h auto-refresh", () => {
     savedCwd = process.cwd();
     savedRagDir = process.env.PI_RAG_DIR;
     process.env.PI_RAG_DIR = ragDir;
+    // Auto-refresh only runs with injection enabled; ragEnabled defaults to
+    // false since 0.7.0, so seed an enabled config like a real session.
+    writeFileSync(join(ragDir, "config.json"), JSON.stringify({ ragEnabled: true }));
     process.chdir(cwdSandbox);
 
     vi.resetModules();

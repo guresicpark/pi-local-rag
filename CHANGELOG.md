@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.0
+
+- **RAG auto-injection now defaults to `off`** (`ragEnabled: false` in fresh configs and after `/rag clear`). Injection is enabled only when the store actually has chunks: at session start when the cwd's store has indexed files (as before), and now also immediately after a successful `/rag index` / `rag_index` run that leaves chunks in the store. Existing stores with `ragEnabled: true` saved in `config.json` keep their setting; `/rag on|off` still toggles manually. README and tests updated for the new default.
+
 ## 0.6.0
 
 - **`/rag clear` factory reset**: in addition to clearing the index, `/rag clear` now deletes every file in the active store directory (`.pi/rag/` project store or `~/.pi/rag/` global — `rag.db`, WAL/SHM sidecars, `config.json`, legacy `index.json`, anything else) and regenerates fresh defaults: a default `config.json` and an empty schema-initialized `rag.db`. Tracked paths, exclude patterns, and custom config are no longer preserved across a clear. New `resetStore()` export (db.ts / package root); `clearIndex()` remains available for index-only wipes.

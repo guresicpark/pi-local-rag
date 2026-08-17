@@ -25,7 +25,7 @@ export interface ExtConfig {
 
 export function defaultConfig(): RagConfig {
   return {
-    ragEnabled: true, ragTopK: 5, ragScoreThreshold: 0.1, ragAlpha: 0.4,
+    ragEnabled: false, ragTopK: 5, ragScoreThreshold: 0.1, ragAlpha: 0.4,
     extraExtensions: [], extraCodeExtensions: [], excludeExtensions: [],
     trackedPaths: [], excludePatterns: [],
   };

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.9
+
+- **Leaner chunking memory — exact sizing, no growth garbage** (memory): `scanLines()` grew its line-offset buffer by 2× from a 1024-slot start, which over-allocated the tail by up to 2× and left a dead backing store for the GC at every doubling step. It now runs two memchr passes — the first counts lines (and flags over-long lines) with no array writes, the second records offsets into a single precisely-sized `Int32Array(lineCount + 1)` — so there is zero over-allocation and zero growth garbage. The slow path (pathologically long lines) likewise replaces its `rowTexts` string array — one sliced-string object per row, sized by the same growable pattern — with three exactly-sized `Int32Array`s (`rowStart`/`rowEnd`/`rowNums`) and joins chunk content from the offsets on demand, so no per-row strings are ever materialized. Output is byte-identical (full vitest suite passes); the extra memchr pass is cheap (~650 MB/s) and roughly offsets the memcpy the old grow steps paid.
+
 ## 0.7.8
 
 - **Faster chunking — sentinel line-offset terminator** (perf): `chunkText()`'s fast and slow paths repeated a per-chunk / per-line "is this the last line?" ternary (`end < lineCount ? starts[end] : text.length + 1` and friends) on every chunk and every blank-line-scan step. `scanLines()` now materializes one extra sentinel slot — `starts[lineCount] = text.length + 1` — so every `starts[end]` / `starts[j + 1]` read is uniform and the last line ends at `starts[lineCount] - 1 === text.length` with no branch. Output is byte-identical (the randomized chunking differential tests plus the full suite still pass); measured ~5–15% faster on realistic corpora (code ~10.10→9.85 ms, prose ~5.10→4.40 ms per ~2 MB), neutral elsewhere.

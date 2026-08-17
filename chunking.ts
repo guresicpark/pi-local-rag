@@ -84,28 +84,47 @@ function scanLines(text: string): { starts: Int32Array; lineCount: number; hasLo
 export function chunkText(text: string, maxLines = 50): { content: string; lineStart: number; lineEnd: number }[] {
   const chunks: { content: string; lineStart: number; lineEnd: number }[] = [];
   const { starts, lineCount, hasLongLine } = scanLines(text);
-  const endOf = (j: number): number => (j + 1 < lineCount ? starts[j + 1] - 1 : text.length);
 
   if (!hasLongLine) {
     // Fast path (no line exceeds the cap — the overwhelmingly common case):
     // rows map 1:1 onto source lines and every chunk is a contiguous slice
     // of `text`, so content comes straight from substring() — in V8 an O(1)
     // sliced string sharing the parent, no bytes copied and no join needed.
+    //
+    // The joined length of rows [i, e) needs no separate prefix-sum array:
+    // it is starts[e] - starts[i] - 1 (each line contributes its length
+    // plus the newline, which lands exactly on the next line's start), with
+    // text.length + 1 standing in for starts[lineCount] at the last window.
+    // So the char-cap check is O(1) per chunk (a short binary search only
+    // when the window actually exceeds MAX_CHUNK_CHARS) and no `endOf`
+    // closure survives in any hot loop. The blank-line scan likewise
+    // checks the first char inline and only calls isBlankRange for rows
+    // that start with whitespace.
     let i = 0;
     while (i < lineCount) {
       let end = Math.min(i + maxLines, lineCount);
       for (let j = end - 1; j > i + 10 && j > end - 15; j--) {
-        if (isBlankRange(text, starts[j], endOf(j))) { end = j + 1; break; }
+        const s = starts[j];
+        const e = j + 1 < lineCount ? starts[j + 1] - 1 : text.length;
+        if (s === e) { end = j + 1; break; }
+        const c = text.charCodeAt(s);
+        if ((c === 32 || (c >= 9 && c <= 13) || c === 0xa0 || c === 0xfeff || c === 0x2028 || c === 0x2029)
+          && isBlankRange(text, s, e)) { end = j + 1; break; }
       }
       // Shrink the window further if the joined content would exceed
       // MAX_CHUNK_CHARS (≈1k tokens — the embedding model's sweet spot).
-      let len = endOf(i) - starts[i];
-      for (let j = i + 1; j < end; j++) {
-        len += 1 + (endOf(j) - starts[j]);
-        if (len > MAX_CHUNK_CHARS) { end = j; break; }
+      const spanEnd = end < lineCount ? starts[end] : text.length + 1;
+      if (spanEnd - starts[i] - 1 > MAX_CHUNK_CHARS) {
+        const t = starts[i] + MAX_CHUNK_CHARS + 1;
+        let lo = i + 1, hi = end;
+        while (hi - lo > 1) {
+          const mid = (lo + hi) >> 1;
+          if (starts[mid] > t) hi = mid; else lo = mid;
+        }
+        end = hi - 1;
       }
       const from = starts[i];
-      const to = endOf(end - 1);
+      const to = end < lineCount ? starts[end] - 1 : text.length;
       if (trimLenGTRange(text, from, to, 20)) {
         chunks.push({ content: text.substring(from, to), lineStart: i + 1, lineEnd: end });
       }
@@ -132,7 +151,7 @@ export function chunkText(text: string, maxLines = 50): { content: string; lineS
   };
   for (let j = 0; j < lineCount; j++) {
     const s = starts[j];
-    const e = endOf(j);
+    const e = j + 1 < lineCount ? starts[j + 1] - 1 : text.length;
     if (e - s <= MAX_LINE_CHARS) {
       pushRow(text.substring(s, e), j + 1);
     } else {

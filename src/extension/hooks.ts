@@ -9,12 +9,15 @@ import { loadConfig, saveConfig } from "../config.ts";
 import { getRagDir, databaseFilePath } from "../store-paths.ts";
 import { withDb, getIndexStats, getIndexedPaths } from "../database.ts";
 import { collectFromTracked } from "../file-discovery.ts";
-import { hybridSearch } from "../search.ts";
+import { hybridSearch, type RetrievalSource } from "../search.ts";
 import { indexFiles, isIndexStale } from "../indexing.ts";
 import { displayPath } from "./paths.ts";
 
 /** How long a chunk's injected preview is truncated to. */
 const INJECTED_CHUNK_PREVIEW_CHARS = 600;
+
+/** Display order of engines in the notify summary. */
+const ENGINE_DISPLAY_ORDER: RetrievalSource[] = ["nomic", "jina-code", "bm25"];
 
 /**
  * Create the before_agent_start handler (one per extension instance so the
@@ -61,21 +64,28 @@ export function createBeforeAgentStartHandler() {
         "```",
       ).join("\n\n");
 
-      // One-line summary for the TUI: group line ranges per file, e.g.
-      // "Automatic RAG lookup provided 4 search hits (a.ts:10-22, b.ts:5-9,40-51)"
-      const lineRangesByFile = new Map<string, string[]>();
+      // One-line summary for the TUI: line ranges grouped per engine, e.g.
+      // "RAG lookup — nomic (a.ts:10-22, b.ts:5-9,40-51), jina-code (c.ts:1-9), bm25 (d.ts:3)"
+      const rangesByFileByEngine = new Map<RetrievalSource, Map<string, string[]>>();
       for (const result of relevantResults) {
-        const ranges = lineRangesByFile.get(result.chunk.file) ?? [];
-        ranges.push(result.chunk.lineStart === result.chunk.lineEnd
-          ? `${result.chunk.lineStart}`
-          : `${result.chunk.lineStart}-${result.chunk.lineEnd}`);
-        lineRangesByFile.set(result.chunk.file, ranges);
+        for (const engine of result.sources) {
+          const rangesByFile = rangesByFileByEngine.get(engine) ?? new Map<string, string[]>();
+          const ranges = rangesByFile.get(result.chunk.file) ?? [];
+          ranges.push(result.chunk.lineStart === result.chunk.lineEnd
+            ? `${result.chunk.lineStart}`
+            : `${result.chunk.lineStart}-${result.chunk.lineEnd}`);
+          rangesByFile.set(result.chunk.file, ranges);
+          rangesByFileByEngine.set(engine, rangesByFile);
+        }
       }
-      const fileSummaries = [...lineRangesByFile.entries()]
-        .map(([file, ranges]) => `${displayPath(file, cwd)}:${ranges.join(",")}`);
-      const summary =
-        `Automatic RAG lookup provided ${relevantResults.length} search hit${relevantResults.length === 1 ? "" : "s"}: ` +
-        `(${fileSummaries.join(", ")})`;
+      const engineSummaries = ENGINE_DISPLAY_ORDER
+        .filter(engine => rangesByFileByEngine.has(engine))
+        .map(engine => {
+          const fileSummaries = [...rangesByFileByEngine.get(engine)!.entries()]
+            .map(([file, ranges]) => `${displayPath(file, cwd)}:${ranges.join(",")}`);
+          return `${engine} (${fileSummaries.join(", ")})`;
+        });
+      const summary = `RAG lookup — ${engineSummaries.join(", ")}`;
 
       // Inject as a message after the user's prompt rather than appending
       // to the system prompt. The system prompt is stable across a session

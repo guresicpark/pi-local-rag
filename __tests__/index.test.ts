@@ -74,7 +74,7 @@ import {
  *  isolates each test. Pulled verbatim from kallewoof@849e485 tests. */
 function createTestDb(chunks: Array<{
   id?: string; file?: string; content: string; lineStart?: number; lineEnd?: number;
-  vector?: number[];
+  vector?: number[]; codeVector?: number[];
 }>): Database {
   const db = new Database(":memory:", { allowExtension: true });
   db.exec("PRAGMA journal_mode = WAL;");
@@ -87,6 +87,9 @@ function createTestDb(chunks: Array<{
   `);
   const insVec = db.prepare(
     "INSERT INTO chunks_vec(rowid, embedding) VALUES (CAST(? AS INTEGER), ?)",
+  );
+  const insCodeVec = db.prepare(
+    "INSERT INTO chunks_vec_code(rowid, embedding) VALUES (CAST(? AS INTEGER), ?)",
   );
   for (let i = 0; i < chunks.length; i++) {
     const c = chunks[i];
@@ -103,6 +106,10 @@ function createTestDb(chunks: Array<{
     if (c.vector) {
       const f = new Float32Array(c.vector);
       insVec.run(Number(result.lastInsertRowid), Buffer.from(f.buffer, f.byteOffset, f.byteLength));
+    }
+    if (c.codeVector) {
+      const f = new Float32Array(c.codeVector);
+      insCodeVec.run(Number(result.lastInsertRowid), Buffer.from(f.buffer, f.byteOffset, f.byteLength));
     }
   }
   return db;
@@ -1145,6 +1152,28 @@ describe("hybridSearch with vectors", () => {
     if (results.length > 0) {
       expect(results[0].hybrid).toBe(results[0].bm25);
     }
+  });
+});
+
+describe("hybridSearch source attribution", () => {
+  const vec = (seed: number) => Array.from({ length: 768 }, (_, i) => (i === seed ? 1 : 0));
+
+  it("keyword-only hit is attributed solely to bm25", async () => {
+    const db = createTestDb([{ file: "/src/kw.ts", content: "authenticate token bearer" }]);
+    const results = await hybridSearch("authenticate", 10, 1.0, db);
+    db.close();
+    expect(results.length).toBe(1);
+    expect(results[0].sources).toEqual(["bm25"]);
+  });
+
+  it("hit found by every candidate source is attributed to all three engines", async () => {
+    const db = createTestDb([
+      { file: "/src/sem.ts", content: "authenticate oauth", vector: vec(0), codeVector: vec(1) },
+    ]);
+    const results = await hybridSearch("authenticate", 10, 0.5, db);
+    db.close();
+    expect(results.length).toBe(1);
+    expect(results[0].sources).toEqual(["bm25", "nomic", "jina-code"]);
   });
 });
 

@@ -8,12 +8,20 @@ import { embedQueryFor } from "./embedding.ts";
 import { getDbConn, type Chunk } from "./database.ts";
 import * as sqlRepository from "./repository.ts";
 
+/**
+ * Which engine surfaced a chunk as a candidate: BM25 (FTS5 keyword),
+ * nomic (prose vector space), or jina-code (code vector space).
+ */
+export type RetrievalSource = "bm25" | "nomic" | "jina-code";
+
 /** A chunk plus its individual and blended relevance scores. */
 export interface ScoredChunk {
   chunk: Chunk;
   bm25: number;
   vector: number;
   hybrid: number;
+  /** Every engine that returned this chunk as a candidate. */
+  sources: RetrievalSource[];
 }
 
 /** Cosine similarity between two vectors; 0 for length mismatch or zero vectors. */
@@ -108,6 +116,18 @@ export async function hybridSearch(
   ]);
   if (candidateRowIds.size === 0) return [];
 
+  // Attribute each candidate to the engine(s) that surfaced it, so
+  // consumers (e.g. the auto-injection summary) can report provenance.
+  const sourcesByRowid = new Map<number, RetrievalSource[]>();
+  const attributeSource = (rowid: number, source: RetrievalSource) => {
+    const attributed = sourcesByRowid.get(rowid) ?? [];
+    if (!attributed.includes(source)) attributed.push(source);
+    sourcesByRowid.set(rowid, attributed);
+  };
+  for (const match of ftsResults) attributeSource(match.rowid, "bm25");
+  for (const match of textVectorResults) attributeSource(match.rowid, "nomic");
+  for (const match of codeVectorResults) attributeSource(match.rowid, "jina-code");
+
   const chunkRows = sqlRepository.getChunksByRowids(database, Array.from(candidateRowIds));
   const chunkByRowid = new Map<number, typeof chunkRows[0]>();
   for (const chunkRow of chunkRows) chunkByRowid.set(chunkRow.rowid, chunkRow);
@@ -184,6 +204,7 @@ export async function hybridSearch(
       bm25: bm25Final,
       vector: vectorSimilarity,
       hybrid: hybridScore,
+      sources: sourcesByRowid.get(rowid) ?? [],
     });
   }
 

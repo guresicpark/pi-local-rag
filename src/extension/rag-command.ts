@@ -199,11 +199,25 @@ async function handleIndexSubcommand(parts: string[], ctx: RagCommandContext) {
     }
     verb = "Refreshing";
     doneLabel = "new/changed";
-    ctx.ui.notify(`Refreshing ${filesToProcess.length} files...`, "info");
+    ctx.ui.notify(`Scanning ${filesToProcess.length} files for changes...`, "info");
   }
 
   const { result, enabledNow } = await withDb(async (database) => {
-    const result = await indexFiles(filesToProcess, createIndexProgressRenderer(ctx, verb, doneLabel), database);
+    const result = await indexFiles(
+      filesToProcess,
+      {
+        ...createIndexProgressRenderer(ctx, verb, doneLabel),
+        onScanComplete: alreadyIndexed
+          ? (toProcess, total) => ctx.ui.notify(
+              toProcess === total
+                ? `Refreshing ${total} files...`
+                : `Refreshing ${toProcess} of ${total} files...`,
+              "info",
+            )
+          : undefined,
+      },
+      database,
+    );
     // ragEnabled defaults to false; flip it on as soon as the store
     // actually has chunks (mirrors the session_start auto-enable).
     const enabledNow = !config.ragEnabled && getIndexStats(database).totalChunks > 0;

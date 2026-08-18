@@ -24,6 +24,12 @@ import * as sqlRepository from "./repository.ts";
 export interface ProgressCallbacks {
   /** Fired per processed file (including skipped ones). */
   onFile?: (current: number, total: number, filename: string, skipped: number) => void;
+  /**
+   * Fired once when the scan phase finishes: `toProcess` files need
+   * (re)indexing out of `total` — the earliest point the new/changed
+   * count is known, since it requires reading + hashing every file.
+   */
+  onScanComplete?: (toProcess: number, total: number) => void;
   onChunk?: (fileChunk: number, totalChunks: number, filename: string) => void;
   /**
    * Fired after each cross-file embed micro-batch completes, per embedding
@@ -252,6 +258,7 @@ export async function indexFiles(
     await yieldToEventLoop();
 
     skippedCount += readErrorCount;
+    progress?.onScanComplete?.(filesToIndex.length, totalPaths);
 
     // ── Phases 2+3: embed in cross-file groups, per model; write each ──
     // ── slice to the DB as soon as its vectors arrive ──────────────────

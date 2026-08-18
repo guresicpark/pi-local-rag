@@ -2,8 +2,9 @@
  * Hybrid search: SQLite FTS5 (BM25) + sqlite-vec (vector KNN) over two
  * independent embedding spaces (prose/nomic and code/jina), merged with a
  * per-query blend weight. Each space's query is embedded only when that
- * space has stored vectors; code-space hits always rank above prose-space
- * hits.
+ * space has stored vectors; results are a fixed quota split — 5 code hits
+ * + 3 prose hits when both groups qualify, 5 of the single group
+ * otherwise.
  */
 import type { DatabaseSync } from "node:sqlite";
 import { embedQueryFor } from "./embedding.ts";
@@ -69,13 +70,25 @@ function l2DistanceToCosine(l2Distance: number): number {
 }
 
 /**
+ * Result-selection quotas for the dual-space policy: 5 code hits + 3 prose
+ * hits when both groups have qualifying hits; 5 of the single group
+ * otherwise. Exported for tests.
+ */
+export const CODE_RESULT_QUOTA = 5;
+export const PROSE_RESULT_QUOTA = 3;
+export const SINGLE_GROUP_RESULT_QUOTA = 5;
+
+/**
  * Run hybrid search over the index: BM25 via FTS5 plus vector KNN over
  * both embedding spaces, blended as `alpha * bm25 + (1 - alpha) * vector`
  * (alpha = 1 → pure BM25 when no vectors exist). Each model embeds the
  * query only when its own vector space has stored vectors — a space with
- * no vectors is skipped entirely (no query embedding, no KNN). When both
- * code and prose hits are present, code hits (jina-code space) always
- * rank above prose hits.
+ * no vectors is skipped entirely (no query embedding, no KNN).
+ *
+ * Result selection is a fixed quota split: both groups present → up to 5
+ * jina-code hits, then up to 3 nomic/bm25 hits (code first); a single
+ * group → up to 5 of that group. `limit` caps each group's quota, not the
+ * combined total.
  */
 export async function hybridSearch(
   query: string,
@@ -221,12 +234,29 @@ export async function hybridSearch(
     });
   }
 
-  // Code hits (surfaced by the jina-code space) always rank above prose
-  // hits whenever both are present; within each group, order by hybrid
-  // score. Chunks found only by BM25 rank with the prose group.
-  const isCodeHit = (scored: ScoredChunk) => (scored.sources.includes("jina-code") ? 1 : 0);
-  return scoredResults
+  // Result selection is a fixed per-group quota split: when both code and
+  // prose hits qualify (hybrid > 0), the result is up to 5 jina-code hits
+  // followed by up to 3 nomic/bm25 hits (code group first — a code hit
+  // always outranks a prose hit); when only one group has hits, that group
+  // fills up to 5 slots. Chunks found only by BM25 rank with the prose
+  // group. Within a group, order is by hybrid score.
+  //
+  // `limit` caps each group's quota (never the combined total — capping
+  // the total at the default topK of 5 would crowd prose back out, the
+  // exact failure the quota split exists to prevent).
+  const isCodeHit = (scored: ScoredChunk) => scored.sources.includes("jina-code");
+  const ranked = scoredResults
     .filter(scored => scored.hybrid > 0)
-    .sort((a, b) => isCodeHit(b) - isCodeHit(a) || b.hybrid - a.hybrid)
-    .slice(0, limit);
+    .sort((a, b) => b.hybrid - a.hybrid);
+  const codeHits = ranked.filter(isCodeHit);
+  const proseHits = ranked.filter(scored => !isCodeHit(scored));
+
+  if (codeHits.length > 0 && proseHits.length > 0) {
+    return [
+      ...codeHits.slice(0, Math.min(CODE_RESULT_QUOTA, limit)),
+      ...proseHits.slice(0, Math.min(PROSE_RESULT_QUOTA, limit)),
+    ];
+  }
+  return (codeHits.length > 0 ? codeHits : proseHits)
+    .slice(0, Math.min(SINGLE_GROUP_RESULT_QUOTA, limit));
 }

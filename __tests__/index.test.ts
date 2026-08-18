@@ -1213,6 +1213,55 @@ describe("hybridSearch dual-space policy (per-space embed gating, code hits pref
     expect(results[0].chunk.content).toContain("authentication authentication");
   });
 
+  it("quota split: 5 code + 3 prose when both groups have qualifying hits", async () => {
+    // 4 code chunks with distinct bm25 scores (the longest is the minimum
+    // and gets dropped by the hybrid > 0 filter) + 1 prose chunk with a
+    // vector hit strong enough to survive. Both groups present → up to 5
+    // code (3 survive) then up to 3 prose (1 survives), code first.
+    // (The mocked embedder returns non-normalized vectors, so all KNN
+    // cosines clamp to 0 — survival therefore rides on bm25 here.)
+    const db = createTestDb([
+      { file: "/src/a.ts", content: "payment refund processing payment refund processing", codeVector: vec(0) },
+      { file: "/src/b.ts", content: "payment refund processing beta utilities", codeVector: vec(1) },
+      { file: "/src/c.ts", content: "payment refund processing gamma helper functions", codeVector: vec(2) },
+      { file: "/src/d.ts", content: "payment refund processing delta ledger audit trail records archive notes", codeVector: vec(3) },
+      { file: "/src/notes.md", content: "payment refund processing gateway transaction overview", vector: vec(4) },
+    ]);
+    const results = await hybridSearch("payment refund processing", 10, 0.5, db);
+    db.close();
+    expect(results.length).toBe(4);
+    expect(results.slice(0, 3).every(r => r.sources.includes("jina-code"))).toBe(true);
+    expect(results[3].chunk.file).toBe("/src/notes.md");
+    expect(results[3].sources).toContain("nomic");
+  });
+
+  it("quota split: single prose group capped at 5 regardless of limit", async () => {
+    const chunks = Array.from({ length: 10 }, (_, i) => ({
+      content: `payment refund processing filler${i} ${"pad word ".repeat(i)}`,
+    }));
+    const db = createTestDb(chunks);
+    const results = await hybridSearch("payment refund processing", 10, 1.0, db);
+    db.close();
+    expect(results.length).toBe(5);
+  });
+
+  it("limit caps each group's quota, not the combined total", async () => {
+    // limit=3 with both groups present → up to 3 code + up to 3 prose;
+    // 3 code + 1 prose survive the filter → 4 results, prose still last.
+    const db = createTestDb([
+      { file: "/src/a.ts", content: "payment refund processing payment refund processing", codeVector: vec(0) },
+      { file: "/src/b.ts", content: "payment refund processing beta utilities", codeVector: vec(1) },
+      { file: "/src/c.ts", content: "payment refund processing gamma helper functions", codeVector: vec(2) },
+      { file: "/src/d.ts", content: "payment refund processing delta ledger audit trail records archive notes", codeVector: vec(3) },
+      { file: "/src/notes.md", content: "payment refund processing gateway transaction overview", vector: vec(4) },
+    ]);
+    const results = await hybridSearch("payment refund processing", 3, 0.5, db);
+    db.close();
+    expect(results.length).toBe(4);
+    expect(results.slice(0, 3).every(r => r.sources.includes("jina-code"))).toBe(true);
+    expect(results[3].chunk.file).toBe("/src/notes.md");
+  });
+
   // The gating tests spy on embedQueryFor to observe which models actually
   // embed the query — the whole point of per-space gating is skipping the
   // unused model, which is not observable through the result shape.

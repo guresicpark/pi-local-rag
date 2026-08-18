@@ -3,7 +3,7 @@
  * independent embedding spaces (prose/nomic and code/jina), merged with a
  * per-query blend weight. Each space's query is embedded only when that
  * space has stored vectors; results are a fixed quota split — 5 code hits
- * + 3 prose hits when both groups qualify, 5 of the single group
+ * + 5 prose hits when both groups qualify, 5 of the single group
  * otherwise.
  */
 import type { DatabaseSync } from "node:sqlite";
@@ -70,12 +70,12 @@ function l2DistanceToCosine(l2Distance: number): number {
 }
 
 /**
- * Result-selection quotas for the dual-space policy: 5 code hits + 3 prose
+ * Result-selection quotas for the dual-space policy: 5 code hits + 5 prose
  * hits when both groups have qualifying hits; 5 of the single group
  * otherwise. Exported for tests.
  */
 export const CODE_RESULT_QUOTA = 5;
-export const PROSE_RESULT_QUOTA = 3;
+export const PROSE_RESULT_QUOTA = 5;
 export const SINGLE_GROUP_RESULT_QUOTA = 5;
 
 /**
@@ -86,7 +86,7 @@ export const SINGLE_GROUP_RESULT_QUOTA = 5;
  * no vectors is skipped entirely (no query embedding, no KNN).
  *
  * Result selection is a fixed quota split: both groups present → up to 5
- * jina-code hits, then up to 3 nomic/bm25 hits (code first); a single
+ * jina-code hits, then up to 5 nomic/bm25 hits (code first); a single
  * group → up to 5 of that group. `limit` caps each group's quota, not the
  * combined total.
  */
@@ -236,7 +236,7 @@ export async function hybridSearch(
 
   // Result selection is a fixed per-group quota split: when both code and
   // prose hits qualify (hybrid > 0), the result is up to 5 jina-code hits
-  // followed by up to 3 nomic/bm25 hits (code group first — a code hit
+  // followed by up to 5 nomic/bm25 hits (code group first — a code hit
   // always outranks a prose hit); when only one group has hits, that group
   // fills up to 5 slots. Chunks found only by BM25 rank with the prose
   // group. Within a group, order is by hybrid score.

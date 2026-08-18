@@ -1213,11 +1213,11 @@ describe("hybridSearch dual-space policy (per-space embed gating, code hits pref
     expect(results[0].chunk.content).toContain("authentication authentication");
   });
 
-  it("quota split: 5 code + 3 prose when both groups have qualifying hits", async () => {
+  it("quota split: 5 code + 5 prose when both groups have qualifying hits", async () => {
     // 4 code chunks with distinct bm25 scores (the longest is the minimum
     // and gets dropped by the hybrid > 0 filter) + 1 prose chunk with a
     // vector hit strong enough to survive. Both groups present → up to 5
-    // code (3 survive) then up to 3 prose (1 survives), code first.
+    // code (3 survive) then up to 5 prose (1 survives), code first.
     // (The mocked embedder returns non-normalized vectors, so all KNN
     // cosines clamp to 0 — survival therefore rides on bm25 here.)
     const db = createTestDb([

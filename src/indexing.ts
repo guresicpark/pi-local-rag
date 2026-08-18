@@ -63,7 +63,14 @@ function stderrProgress(message: string) {
   writeProgressLineToStderr(message);
 }
 
-/** A chunk with its content hash filled in (chunk ids are `fileHash-lineStart`). */
+/**
+ * A chunk with its content hash filled in (chunk ids are
+ * `fileHash-chunkOrdinal-lineStart`). The ordinal is required for
+ * uniqueness: a pathologically long line is split into MAX_LINE_CHARS
+ * segments that share the source line's number, so several chunks of a
+ * minified/CSV file can legitimately start on the same line — ids keyed by
+ * lineStart alone collide and fail the chunks.id UNIQUE constraint.
+ */
 interface HashedChunk {
   content: string;
   lineStart: number;
@@ -292,7 +299,7 @@ export async function indexFiles(
           const { fileWork, chunkIndex } = slice[slicePosition];
           const chunk = fileWork.rawChunks[chunkIndex]!;
           const insertResult = sqlRepository.insertChunk(database, {
-            id: `${fileWork.chunkIdPrefix}-${chunk.lineStart}`,
+            id: `${fileWork.chunkIdPrefix}-${chunkIndex}-${chunk.lineStart}`,
             filePath: fileWork.filePath,
             content: chunk.content,
             lineStart: chunk.lineStart,

@@ -753,6 +753,60 @@ describe("indexFiles --force", () => {
   });
 });
 
+// ─── indexFiles: chunk-id uniqueness on long-line files ─────────────────────
+
+describe("indexFiles: minified/long-line files (UNIQUE chunk ids)", () => {
+  let tmp: string;
+  let savedRagDir: string | undefined;
+  let mod: typeof import("../index.ts");
+
+  beforeAll(async () => {
+    tmp = realpathSync(mkdtempSync(join(tmpdir(), "rag-minified-")));
+    savedRagDir = process.env.PI_RAG_DIR;
+    process.env.PI_RAG_DIR = tmp;
+    vi.resetModules();
+    mod = await import("../index.ts");
+  });
+
+  afterAll(() => {
+    rmSync(tmp, { recursive: true, force: true });
+    if (savedRagDir !== undefined) process.env.PI_RAG_DIR = savedRagDir;
+    else delete process.env.PI_RAG_DIR;
+  });
+
+  it("indexes a file whose single long line spans several chunks without UNIQUE constraint failure", async () => {
+    const proj = mkdtempSync(join(tmpdir(), "rag-minified-proj-"));
+    try {
+      // One 10k-char line (slow chunking path: segments share the source
+      // line number) + trailing normal lines. Chunk windows cut mid-line, so
+      // multiple chunks start on line 1 — ids keyed by lineStart alone
+      // collided (UNIQUE constraint failed: chunks.id).
+      const fp = join(proj, "bundle.min.js");
+      writeFileSync(fp, "a".repeat(10_000) + "\nconst x = 1;\n");
+
+      const result = await mod.indexFiles([fp]);
+      expect(result.indexed).toBe(1);
+      expect(result.chunks).toBeGreaterThanOrEqual(2);
+
+      const db = mod.getFreshDbConn();
+      try {
+        const rows = db.prepare("SELECT id, line_start FROM chunks WHERE file_path = ?").all(fp) as Array<{
+          id: string; line_start: number;
+        }>;
+        expect(rows.length).toBe(result.chunks);
+        // Several chunks legitimately start on line 1…
+        expect(rows.filter(r => r.line_start === 1).length).toBeGreaterThanOrEqual(2);
+        // …yet every id is unique.
+        expect(new Set(rows.map(r => r.id)).size).toBe(rows.length);
+      } finally {
+        db.close();
+      }
+    } finally {
+      rmSync(proj, { recursive: true, force: true });
+    }
+  });
+});
+
 // ─── extractText (plain / PDF / DOCX / HTML) ────────────────────────────────
 
 describe("extractText", () => {

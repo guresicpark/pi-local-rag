@@ -1,8 +1,9 @@
 /**
  * Hybrid search: SQLite FTS5 (BM25) + sqlite-vec (vector KNN) over two
  * independent embedding spaces (prose/nomic and code/jina), merged with a
- * per-query blend weight. Whenever any vectors exist the query is embedded
- * with both models, and code-space hits always rank above prose-space hits.
+ * per-query blend weight. Each space's query is embedded only when that
+ * space has stored vectors; code-space hits always rank above prose-space
+ * hits.
  */
 import type { DatabaseSync } from "node:sqlite";
 import { embedQueryFor } from "./embedding.ts";
@@ -70,10 +71,11 @@ function l2DistanceToCosine(l2Distance: number): number {
 /**
  * Run hybrid search over the index: BM25 via FTS5 plus vector KNN over
  * both embedding spaces, blended as `alpha * bm25 + (1 - alpha) * vector`
- * (alpha = 1 → pure BM25 when no vectors exist). Whenever any vectors
- * exist the query is embedded with both models (nomic + jina-code) and
- * both spaces are searched; when code and prose hits are both present,
- * code hits (jina-code space) always rank above prose hits.
+ * (alpha = 1 → pure BM25 when no vectors exist). Each model embeds the
+ * query only when its own vector space has stored vectors — a space with
+ * no vectors is skipped entirely (no query embedding, no KNN). When both
+ * code and prose hits are present, code hits (jina-code space) always
+ * rank above prose hits.
  */
 export async function hybridSearch(
   query: string,
@@ -98,21 +100,21 @@ export async function hybridSearch(
 
   // Vector search via sqlite-vec — two independent spaces: prose chunks
   // live in chunks_vec (nomic), code chunks in chunks_vec_code (jina).
-  // Whenever ANY vectors exist (in either space) the query is embedded
-  // with BOTH models and both spaces are searched; a space with no stored
-  // vectors simply yields no KNN matches.
+  // Each model's query is only embedded when its table actually has
+  // vectors (skips loading a model the store can't use); when both
+  // spaces are populated, both queries are embedded in parallel and both
+  // spaces are searched.
   const vectorCandidateLimit = Math.max(limit * 10, 100);
-  const hasAnyStoredVectors =
-    sqlRepository.getEmbeddedCount(database) > 0 || sqlRepository.getCodeEmbeddedCount(database) > 0;
-  const [textQueryVector, codeQueryVector] = hasAnyStoredVectors
-    ? await Promise.all([embedQueryFor("text", query), embedQueryFor("code", query)])
-    : [];
-  const textVectorResults = textQueryVector
-    ? sqlRepository.searchVectors(database, textQueryVector, vectorCandidateLimit)
-    : [];
-  const codeVectorResults = codeQueryVector
-    ? sqlRepository.searchCodeVectors(database, codeQueryVector, vectorCandidateLimit)
-    : [];
+  const [textVectorResults, codeVectorResults] = await Promise.all([
+    (async () =>
+      sqlRepository.getEmbeddedCount(database)
+        ? sqlRepository.searchVectors(database, await embedQueryFor("text", query), vectorCandidateLimit)
+        : [])(),
+    (async () =>
+      sqlRepository.getCodeEmbeddedCount(database)
+        ? sqlRepository.searchCodeVectors(database, await embedQueryFor("code", query), vectorCandidateLimit)
+        : [])(),
+  ]);
 
   // Union of candidate rowids from all three sources, then hydrate once.
   const candidateRowIds = new Set<number>([

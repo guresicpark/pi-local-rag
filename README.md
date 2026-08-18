@@ -9,7 +9,7 @@ Local hybrid RAG pipeline for the [Pi coding agent](https://github.com/badlogic/
 **Embedding models**
 
 - Switched from `Xenova/all-MiniLM-L6-v2` (384-dim, ~23 MB) to `nomic-ai/nomic-embed-text-v1.5` (768-dim, q8, ~111 MB) with the required `search_query:` / `search_document:` task prefixes; existing stores auto-migrate
-- Dual-model embedding: code files → `jinaai/jina-embeddings-v2-base-code` (768-dim, ~170 MB), prose/data/docs → nomic; vectors in separate `sqlite-vec` tables, hybrid search embeds the query with both models and ranks by absolute cosine similarity (shared scale across spaces). Each model gets input tailored to its strength — nomic uses its asymmetric `search_query:`/`search_document:` prefixes, and code chunks are embedded with their file basename prepended (jina-code was trained on code-with-context pairs)
+- Dual-model embedding: code files → `jinaai/jina-embeddings-v2-base-code` (768-dim, ~170 MB), prose/data/docs → nomic; vectors in separate `sqlite-vec` tables, hybrid search embeds the query per model (only when that model's space has vectors) and ranks by absolute cosine similarity (shared scale across spaces); code hits always rank above prose hits. Each model gets input tailored to its strength — nomic uses its asymmetric `search_query:`/`search_document:` prefixes, and code chunks are embedded with their file basename prepended (jina-code was trained on code-with-context pairs)
 - `/rag ext` commands now take an optional `[code|text]` group; new `extraCodeExtensions` config field
 
 **Reliability & security fixes**
@@ -36,7 +36,7 @@ Local hybrid RAG pipeline for the [Pi coding agent](https://github.com/badlogic/
 
 ## Features
 
-- **Hybrid BM25 + vector search** — SQLite FTS5 for keyword scoring, [`sqlite-vec`](https://github.com/asg017/sqlite-vec) for 768-dim cosine NN, blended at retrieval time
+- **Hybrid BM25 + vector search** — SQLite FTS5 for keyword scoring, [`sqlite-vec`](https://github.com/asg017/sqlite-vec) for 768-dim cosine NN (per model: a space is queried only when it has vectors), blended at retrieval time; code hits rank above prose hits
 - **Dual local ONNX embeddings** — code files are embedded by `jinaai/jina-embeddings-v2-base-code` (~170 MB quantized, trained on code + docstrings); everything else (prose, Markdown, data/config, PDF/DOCX/HTML) by `nomic-ai/nomic-embed-text-v1.5` (~111 MB quantized). Vectors live in separate `sqlite-vec` tables and hybrid search queries **both** spaces, ranking by absolute cosine similarity — all fully offline after first download
 - **Many file formats** — text, source code, Markdown, JSON, YAML, plus PDF (with optional OCR fallback for scanned docs), DOCX, HTML (auto-converted to Markdown)
 - **Per-project storage** — walks up from cwd looking for `.pi/rag/`; falls back to `~/.pi/rag/` global store

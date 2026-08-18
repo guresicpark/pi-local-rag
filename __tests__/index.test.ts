@@ -39,6 +39,7 @@ const SAMPLE_PDF = readFileSync(join(__dirname, "fixtures", "sample.pdf"));
 const SAMPLE_IMAGE_PDF = readFileSync(join(__dirname, "fixtures", "sample-image.pdf"));
 
 // Imports that don't depend on env-time state can be static.
+import * as embeddingModule from "../src/embedding.ts";
 import {
   chunkText,
   MAX_LINE_CHARS,
@@ -1177,7 +1178,7 @@ describe("hybridSearch source attribution", () => {
   });
 });
 
-describe("hybridSearch dual-space policy (both models embed, code hits preferred)", () => {
+describe("hybridSearch dual-space policy (per-space embed gating, code hits preferred)", () => {
   const vec = (seed: number) => Array.from({ length: 768 }, (_, i) => (i === seed ? 1 : 0));
 
   it("code vector hits rank above prose vector hits even when the prose hit scores higher", async () => {
@@ -1212,28 +1213,61 @@ describe("hybridSearch dual-space policy (both models embed, code hits preferred
     expect(results[0].chunk.content).toContain("authentication authentication");
   });
 
-  it("embeds with both models and queries both spaces when only code vectors exist", async () => {
-    const db = createTestDb([
-      { file: "/src/auth.ts", content: "function authenticate(user) { return verify(user); }", codeVector: vec(0) },
-      { file: "/src/notes.md", content: "payment refund processing gateway transaction" },
-    ]);
-    const results = await hybridSearch("authenticate", 10, 0.5, db);
-    db.close();
-    expect(results.length).toBe(1);
-    expect(results[0].chunk.file).toBe("/src/auth.ts");
-    expect(results[0].sources).toEqual(["bm25", "jina-code"]);
+  // The gating tests spy on embedQueryFor to observe which models actually
+  // embed the query — the whole point of per-space gating is skipping the
+  // unused model, which is not observable through the result shape.
+  const spyEmbedGroups = () =>
+    vi.spyOn(embeddingModule, "embedQueryFor")
+      .mockImplementation(async () => new Array(768).fill(0.1));
+
+  it("skips the code-model query embedding when only prose vectors are stored", async () => {
+    const embedSpy = spyEmbedGroups();
+    try {
+      const db = createTestDb([
+        { file: "/src/auth.ts", content: "function authenticate(user) { return verify(user); }" },
+        { file: "/src/notes.md", content: "payment refund processing gateway transaction", vector: vec(1) },
+      ]);
+      const results = await hybridSearch("payment refund", 10, 0.5, db);
+      db.close();
+      expect(embedSpy.mock.calls.map(call => call[0])).toEqual(["text"]);
+      expect(results.length).toBe(1);
+      expect(results[0].chunk.file).toBe("/src/notes.md");
+      expect(results[0].sources).toEqual(["bm25", "nomic"]);
+    } finally {
+      embedSpy.mockRestore();
+    }
   });
 
-  it("embeds with both models and queries both spaces when only prose vectors exist", async () => {
-    const db = createTestDb([
-      { file: "/src/auth.ts", content: "function authenticate(user) { return verify(user); }" },
-      { file: "/src/notes.md", content: "payment refund processing gateway transaction", vector: vec(1) },
-    ]);
-    const results = await hybridSearch("payment refund", 10, 0.5, db);
-    db.close();
-    expect(results.length).toBe(1);
-    expect(results[0].chunk.file).toBe("/src/notes.md");
-    expect(results[0].sources).toEqual(["bm25", "nomic"]);
+  it("skips the text-model query embedding when only code vectors are stored", async () => {
+    const embedSpy = spyEmbedGroups();
+    try {
+      const db = createTestDb([
+        { file: "/src/auth.ts", content: "function authenticate(user) { return verify(user); }", codeVector: vec(0) },
+        { file: "/src/notes.md", content: "payment refund processing gateway transaction" },
+      ]);
+      const results = await hybridSearch("authenticate", 10, 0.5, db);
+      db.close();
+      expect(embedSpy.mock.calls.map(call => call[0])).toEqual(["code"]);
+      expect(results.length).toBe(1);
+      expect(results[0].chunk.file).toBe("/src/auth.ts");
+      expect(results[0].sources).toEqual(["bm25", "jina-code"]);
+    } finally {
+      embedSpy.mockRestore();
+    }
+  });
+
+  it("embeds the query with both models when both spaces have vectors", async () => {
+    const embedSpy = spyEmbedGroups();
+    try {
+      const db = createTestDb([
+        { file: "/src/sem.ts", content: "authenticate oauth", vector: vec(0), codeVector: vec(1) },
+      ]);
+      await hybridSearch("authenticate", 10, 0.5, db);
+      db.close();
+      expect(embedSpy.mock.calls.map(call => call[0]).sort()).toEqual(["code", "text"]);
+    } finally {
+      embedSpy.mockRestore();
+    }
   });
 });
 

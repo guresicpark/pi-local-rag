@@ -1,7 +1,8 @@
 /**
  * Hybrid search: SQLite FTS5 (BM25) + sqlite-vec (vector KNN) over two
  * independent embedding spaces (prose/nomic and code/jina), merged with a
- * per-query blend weight.
+ * per-query blend weight. Whenever any vectors exist the query is embedded
+ * with both models, and code-space hits always rank above prose-space hits.
  */
 import type { DatabaseSync } from "node:sqlite";
 import { embedQueryFor } from "./embedding.ts";
@@ -69,7 +70,10 @@ function l2DistanceToCosine(l2Distance: number): number {
 /**
  * Run hybrid search over the index: BM25 via FTS5 plus vector KNN over
  * both embedding spaces, blended as `alpha * bm25 + (1 - alpha) * vector`
- * (alpha = 1 → pure BM25 when no vectors exist).
+ * (alpha = 1 → pure BM25 when no vectors exist). Whenever any vectors
+ * exist the query is embedded with both models (nomic + jina-code) and
+ * both spaces are searched; when code and prose hits are both present,
+ * code hits (jina-code space) always rank above prose hits.
  */
 export async function hybridSearch(
   query: string,
@@ -94,19 +98,21 @@ export async function hybridSearch(
 
   // Vector search via sqlite-vec — two independent spaces: prose chunks
   // live in chunks_vec (nomic), code chunks in chunks_vec_code (jina).
-  // Each model's query is only built when its table actually has vectors
-  // (avoids loading a model the store can't use).
+  // Whenever ANY vectors exist (in either space) the query is embedded
+  // with BOTH models and both spaces are searched; a space with no stored
+  // vectors simply yields no KNN matches.
   const vectorCandidateLimit = Math.max(limit * 10, 100);
-  const [textVectorResults, codeVectorResults] = await Promise.all([
-    (async () =>
-      sqlRepository.getEmbeddedCount(database)
-        ? sqlRepository.searchVectors(database, await embedQueryFor("text", query), vectorCandidateLimit)
-        : [])(),
-    (async () =>
-      sqlRepository.getCodeEmbeddedCount(database)
-        ? sqlRepository.searchCodeVectors(database, await embedQueryFor("code", query), vectorCandidateLimit)
-        : [])(),
-  ]);
+  const hasAnyStoredVectors =
+    sqlRepository.getEmbeddedCount(database) > 0 || sqlRepository.getCodeEmbeddedCount(database) > 0;
+  const [textQueryVector, codeQueryVector] = hasAnyStoredVectors
+    ? await Promise.all([embedQueryFor("text", query), embedQueryFor("code", query)])
+    : [];
+  const textVectorResults = textQueryVector
+    ? sqlRepository.searchVectors(database, textQueryVector, vectorCandidateLimit)
+    : [];
+  const codeVectorResults = codeQueryVector
+    ? sqlRepository.searchCodeVectors(database, codeQueryVector, vectorCandidateLimit)
+    : [];
 
   // Union of candidate rowids from all three sources, then hydrate once.
   const candidateRowIds = new Set<number>([
@@ -134,19 +140,24 @@ export async function hybridSearch(
 
   // Min-max normalize BM25 scores across the FTS candidate set (constant 1
   // when every candidate ties, so ties stay rankable rather than zeroed).
+  // FTS5's bm25() is lower-is-better (more negative = better match), so
+  // scores are negated first — the normalization and the hybrid blend both
+  // assume bigger-is-better.
   const bm25NormalizedByRowid = new Map<number, number>();
   if (ftsResults.length > 0) {
     let bm25Max = -Infinity;
     let bm25Min = Infinity;
     for (const match of ftsResults) {
-      if (match.bm25_score > bm25Max) bm25Max = match.bm25_score;
-      if (match.bm25_score < bm25Min) bm25Min = match.bm25_score;
+      const bm25Score = -match.bm25_score;
+      if (bm25Score > bm25Max) bm25Max = bm25Score;
+      if (bm25Score < bm25Min) bm25Min = bm25Score;
     }
     const bm25Range = bm25Max - bm25Min;
     for (const match of ftsResults) {
+      const bm25Score = -match.bm25_score;
       bm25NormalizedByRowid.set(
         match.rowid,
-        bm25Range === 0 ? 1 : (match.bm25_score - bm25Min) / bm25Range,
+        bm25Range === 0 ? 1 : (bm25Score - bm25Min) / bm25Range,
       );
     }
   }
@@ -208,8 +219,12 @@ export async function hybridSearch(
     });
   }
 
+  // Code hits (surfaced by the jina-code space) always rank above prose
+  // hits whenever both are present; within each group, order by hybrid
+  // score. Chunks found only by BM25 rank with the prose group.
+  const isCodeHit = (scored: ScoredChunk) => (scored.sources.includes("jina-code") ? 1 : 0);
   return scoredResults
     .filter(scored => scored.hybrid > 0)
-    .sort((a, b) => b.hybrid - a.hybrid)
+    .sort((a, b) => isCodeHit(b) - isCodeHit(a) || b.hybrid - a.hybrid)
     .slice(0, limit);
 }

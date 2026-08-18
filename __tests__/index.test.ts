@@ -1177,6 +1177,66 @@ describe("hybridSearch source attribution", () => {
   });
 });
 
+describe("hybridSearch dual-space policy (both models embed, code hits preferred)", () => {
+  const vec = (seed: number) => Array.from({ length: 768 }, (_, i) => (i === seed ? 1 : 0));
+
+  it("code vector hits rank above prose vector hits even when the prose hit scores higher", async () => {
+    // audit.ts is the bm25 minimum → normalized to 0 → dropped by the
+    // hybrid > 0 filter; it exists only so ledger.ts's normalized bm25 > 0.
+    const db = createTestDb([
+      { file: "/src/prose.md", content: "payment refund processing payment refund processing", vector: vec(1) },
+      { file: "/src/ledger.ts", content: "function payment refund processing helper utilities module", codeVector: vec(0) },
+      { file: "/src/audit.ts", content: "function payment refund processing ledger audit trail records archive", codeVector: vec(2) },
+    ]);
+    const results = await hybridSearch("payment refund processing", 10, 0.5, db);
+    db.close();
+    expect(results.length).toBe(2);
+    expect(results[0].chunk.file).toBe("/src/ledger.ts");
+    expect(results[0].sources).toContain("jina-code");
+    expect(results[1].chunk.file).toBe("/src/prose.md");
+    expect(results[1].hybrid).toBeGreaterThan(results[0].hybrid);
+  });
+
+  it("better bm25 matches normalize to higher scores (FTS5 bm25 is lower-is-better)", async () => {
+    // The third chunk is the bm25 minimum → normalized to 0 → dropped by
+    // the hybrid > 0 filter; it exists so the mid-tier chunk survives.
+    const db = createTestDb([
+      { content: "authentication authentication token validator" },
+      { content: "authentication token validator helper utilities" },
+      { content: "authentication token validator ledger audit trail records archive notes" },
+    ]);
+    const results = await hybridSearch("authentication token", 10, 1.0, db);
+    db.close();
+    expect(results.length).toBe(2);
+    expect(results[0].bm25).toBeGreaterThan(results[1].bm25);
+    expect(results[0].chunk.content).toContain("authentication authentication");
+  });
+
+  it("embeds with both models and queries both spaces when only code vectors exist", async () => {
+    const db = createTestDb([
+      { file: "/src/auth.ts", content: "function authenticate(user) { return verify(user); }", codeVector: vec(0) },
+      { file: "/src/notes.md", content: "payment refund processing gateway transaction" },
+    ]);
+    const results = await hybridSearch("authenticate", 10, 0.5, db);
+    db.close();
+    expect(results.length).toBe(1);
+    expect(results[0].chunk.file).toBe("/src/auth.ts");
+    expect(results[0].sources).toEqual(["bm25", "jina-code"]);
+  });
+
+  it("embeds with both models and queries both spaces when only prose vectors exist", async () => {
+    const db = createTestDb([
+      { file: "/src/auth.ts", content: "function authenticate(user) { return verify(user); }" },
+      { file: "/src/notes.md", content: "payment refund processing gateway transaction", vector: vec(1) },
+    ]);
+    const results = await hybridSearch("payment refund", 10, 0.5, db);
+    db.close();
+    expect(results.length).toBe(1);
+    expect(results[0].chunk.file).toBe("/src/notes.md");
+    expect(results[0].sources).toEqual(["bm25", "nomic"]);
+  });
+});
+
 // ─── /rag find glob matching ────────────────────────────────────────────────
 
 describe("/rag find glob matching", () => {

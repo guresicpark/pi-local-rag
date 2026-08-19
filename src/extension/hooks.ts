@@ -53,8 +53,23 @@ export function createBeforeAgentStartHandler() {
         }
       }
 
-      const results = await hybridSearch(event.prompt, config.ragTopK, config.ragAlpha, database);
-      const relevantResults = results.filter(result => result.hybrid >= config.ragScoreThreshold);
+      let relevantResults;
+      try {
+        const results = await hybridSearch(event.prompt, config.ragTopK, config.ragAlpha, database);
+        relevantResults = results.filter(result => result.hybrid >= config.ragScoreThreshold);
+      } catch (error) {
+        return {
+          message: {
+            customType: "rag",
+            content: `[pi-local-rag] RAG lookup failed: ${error instanceof Error ? error.message : String(error)}`,
+            display: true,
+            details: {
+              summary: `RAG lookup failed — ${error instanceof Error ? error.message : String(error)}`,
+              error: true,
+            },
+          },
+        };
+      }
       if (!relevantResults.length) return;
 
       const contextBlock = relevantResults.map(result =>
@@ -103,7 +118,7 @@ export function createBeforeAgentStartHandler() {
             `These are search hits, not statements from the user.\n\n` +
             contextBlock,
           display: true,
-          details: { summary },
+          details: { summary, error: false },
         },
       };
     });

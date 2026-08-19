@@ -98,10 +98,11 @@ export default function piLocalRagExtension(pi: ExtensionAPI) {
   // TUI. The full chunk context in `content` still goes to the model;
   // `details.summary` carries the one-line form shown to the user.
   pi.registerMessageRenderer("rag", (message, { outputPad }, theme) => {
-    const summary = (message.details as { summary?: string } | undefined)?.summary;
+    const details = (message.details as { summary?: string; error?: boolean } | undefined);
+    const summary = details?.summary;
     if (!summary) return undefined;
     const box = new Box(outputPad, 1, (boxTheme) => theme.bg("customMessageBg", boxTheme));
-    box.addChild(new Text(theme.fg("dim", summary), 0, 0));
+    box.addChild(new Text(theme.fg(details?.error ? "error" : "success", summary), 0, 0));
     return box;
   });
 

@@ -44,7 +44,7 @@
  *   src/file-discovery.ts   — sync/async walkers, tracked paths, exclusion matching
  *   src/text-extraction.ts  — extractText (txt/pdf/docx/html) + OCR fallback
  *   src/embedding.ts        — dual ONNX pipelines (nomic + jina-code)
- *   src/search.ts           — cosineSimilarity, normalize, hybridSearch
+ *   src/search.ts           — cosineSimilarity, normalize, hybridSearch, splitResultQuotas
  *   src/indexing.ts         — indexFiles (parallel reads, per-model embed batches)
  *   src/extension/*         — Pi extension wiring (UI, hooks, /rag command, tools)
  *   index.ts                — extension entry point (this file) + re-exports
@@ -87,7 +87,7 @@ export {
   cleanQuery, resolveModelCacheDir,
 } from "./src/embedding.ts";
 export type { ScoredChunk } from "./src/search.ts";
-export { cosineSimilarity, normalize, hybridSearch } from "./src/search.ts";
+export { cosineSimilarity, normalize, hybridSearch, splitResultQuotas } from "./src/search.ts";
 export { isIndexStale, indexFiles } from "./src/indexing.ts";
 export type { ProgressCallbacks } from "./src/indexing.ts";
 

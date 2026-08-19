@@ -2,9 +2,10 @@
  * Hybrid search: SQLite FTS5 (BM25) + sqlite-vec (vector KNN) over two
  * independent embedding spaces (prose/nomic and code/jina), merged with a
  * per-query blend weight. Each space's query is embedded only when that
- * space has stored vectors; results are a fixed quota split — 5 code hits
- * + 5 prose hits when both groups qualify, 5 of the single group
- * otherwise.
+ * space has stored vectors; results are a ratio-based quota split — the
+ * total (5, capped by `limit`) is divided between code and prose in
+ * proportion to each space's stored vector count, integer quotas with a
+ * minimum of 1 per group when both qualify.
  */
 import type { DatabaseSync } from "node:sqlite";
 import { embedQueryFor } from "./embedding.ts";
@@ -70,13 +71,31 @@ function l2DistanceToCosine(l2Distance: number): number {
 }
 
 /**
- * Result-selection quotas for the dual-space policy: 5 code hits + 5 prose
- * hits when both groups have qualifying hits; 5 of the single group
- * otherwise. Exported for tests.
+ * Total number of result slots when both groups qualify (or a single
+ * group fills the result alone). `limit` can only shrink this, never
+ * grow it.
  */
-export const CODE_RESULT_QUOTA = 5;
-export const PROSE_RESULT_QUOTA = 5;
-export const SINGLE_GROUP_RESULT_QUOTA = 5;
+export const RESULT_TOTAL_QUOTA = 5;
+
+/**
+ * Split `total` result slots between the code and prose groups in
+ * proportion to the store's stored vector counts (the corpus
+ * composition ratio). Integer quotas that sum exactly to `total`, each
+ * at least 1 — except `total < 2`, where both minimums can't hold and
+ * the single slot goes to the code group (code-first policy). Exported
+ * for tests.
+ */
+export function splitResultQuotas(
+  total: number,
+  codeVectorCount: number,
+  proseVectorCount: number,
+): { codeQuota: number; proseQuota: number } {
+  if (total < 2) return { codeQuota: total, proseQuota: 0 };
+  const vectorTotal = codeVectorCount + proseVectorCount;
+  const codeShare = vectorTotal > 0 ? codeVectorCount / vectorTotal : 0.5;
+  const codeQuota = Math.min(total - 1, Math.max(1, Math.round(total * codeShare)));
+  return { codeQuota, proseQuota: total - codeQuota };
+}
 
 /**
  * Run hybrid search over the index: BM25 via FTS5 plus vector KNN over
@@ -85,10 +104,13 @@ export const SINGLE_GROUP_RESULT_QUOTA = 5;
  * query only when its own vector space has stored vectors — a space with
  * no vectors is skipped entirely (no query embedding, no KNN).
  *
- * Result selection is a fixed quota split: both groups present → up to 5
- * jina-code hits, then up to 5 nomic/bm25 hits (code first); a single
- * group → up to 5 of that group. `limit` caps each group's quota, not the
- * combined total.
+ * Result selection is a ratio-based quota split: the result totals
+ * RESULT_TOTAL_QUOTA (5, capped by `limit`) and is split between code
+ * and prose proportionally to each space's stored vector count —
+ * integer quotas summing exactly to the total, at least 1 per group
+ * when both qualify, code group first. A group that can't fill its
+ * quota yields the slack to the other group's next-best hits; when only
+ * one group qualifies it takes the whole total.
  */
 export async function hybridSearch(
   query: string,
@@ -116,15 +138,18 @@ export async function hybridSearch(
   // Each model's query is only embedded when its table actually has
   // vectors (skips loading a model the store can't use); when both
   // spaces are populated, both queries are embedded in parallel and both
-  // spaces are searched.
+  // spaces are searched. The per-space counts also drive the ratio-based
+  // result quota split below.
   const vectorCandidateLimit = Math.max(limit * 10, 100);
+  const proseVectorCount = sqlRepository.getEmbeddedCount(database);
+  const codeVectorCount = sqlRepository.getCodeEmbeddedCount(database);
   const [textVectorResults, codeVectorResults] = await Promise.all([
     (async () =>
-      sqlRepository.getEmbeddedCount(database)
+      proseVectorCount
         ? sqlRepository.searchVectors(database, await embedQueryFor("text", query), vectorCandidateLimit)
         : [])(),
     (async () =>
-      sqlRepository.getCodeEmbeddedCount(database)
+      codeVectorCount
         ? sqlRepository.searchCodeVectors(database, await embedQueryFor("code", query), vectorCandidateLimit)
         : [])(),
   ]);
@@ -234,16 +259,16 @@ export async function hybridSearch(
     });
   }
 
-  // Result selection is a fixed per-group quota split: when both code and
-  // prose hits qualify (hybrid > 0), the result is up to 5 jina-code hits
-  // followed by up to 5 nomic/bm25 hits (code group first — a code hit
-  // always outranks a prose hit); when only one group has hits, that group
-  // fills up to 5 slots. Chunks found only by BM25 rank with the prose
-  // group. Within a group, order is by hybrid score.
-  //
-  // `limit` caps each group's quota (never the combined total — capping
-  // the total at the default topK of 5 would crowd prose back out, the
-  // exact failure the quota split exists to prevent).
+  // Result selection is a ratio-based quota split: the result totals
+  // RESULT_TOTAL_QUOTA (5, capped by `limit`), divided between the code
+  // and prose groups in proportion to the store's per-space vector
+  // counts — integer quotas summing exactly to the total, at least 1 per
+  // group when both qualify, code group first (a code hit outranks a
+  // prose hit at equal quota rank). A group with fewer qualifying hits
+  // than its quota yields the slack to the other group's next-best hits
+  // (best hybrid first), so the total stays filled. Chunks found only by
+  // BM25 rank with the prose group. Within a group, order is by hybrid
+  // score. When only one group qualifies, it takes the whole total.
   const isCodeHit = (scored: ScoredChunk) => scored.sources.includes("jina-code");
   const ranked = scoredResults
     .filter(scored => scored.hybrid > 0)
@@ -251,12 +276,26 @@ export async function hybridSearch(
   const codeHits = ranked.filter(isCodeHit);
   const proseHits = ranked.filter(scored => !isCodeHit(scored));
 
+  const total = Math.min(limit, RESULT_TOTAL_QUOTA);
+
   if (codeHits.length > 0 && proseHits.length > 0) {
-    return [
-      ...codeHits.slice(0, Math.min(CODE_RESULT_QUOTA, limit)),
-      ...proseHits.slice(0, Math.min(PROSE_RESULT_QUOTA, limit)),
-    ];
+    const { codeQuota, proseQuota } = splitResultQuotas(total, codeVectorCount, proseVectorCount);
+    const codePrimary = codeHits.slice(0, codeQuota);
+    const prosePrimary = proseHits.slice(0, proseQuota);
+    const shortfall = total - (codePrimary.length + prosePrimary.length);
+    let codeExtra: ScoredChunk[] = [];
+    let proseExtra: ScoredChunk[] = [];
+    if (shortfall > 0) {
+      const filler = [
+        ...codeHits.slice(codePrimary.length),
+        ...proseHits.slice(prosePrimary.length),
+      ]
+        .sort((a, b) => b.hybrid - a.hybrid)
+        .slice(0, shortfall);
+      codeExtra = filler.filter(isCodeHit);
+      proseExtra = filler.filter(scored => !isCodeHit(scored));
+    }
+    return [...codePrimary, ...codeExtra, ...prosePrimary, ...proseExtra];
   }
-  return (codeHits.length > 0 ? codeHits : proseHits)
-    .slice(0, Math.min(SINGLE_GROUP_RESULT_QUOTA, limit));
+  return (codeHits.length > 0 ? codeHits : proseHits).slice(0, total);
 }

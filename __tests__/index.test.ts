@@ -62,6 +62,7 @@ import {
   isExcludedByConfig,
   extractText,
   hybridSearch,
+  splitResultQuotas,
   sha256,
   initSchema,
   getOcrTooling,
@@ -1213,11 +1214,12 @@ describe("hybridSearch dual-space policy (per-space embed gating, code hits pref
     expect(results[0].chunk.content).toContain("authentication authentication");
   });
 
-  it("quota split: 5 code + 5 prose when both groups have qualifying hits", async () => {
-    // 4 code chunks with distinct bm25 scores (the longest is the minimum
-    // and gets dropped by the hybrid > 0 filter) + 1 prose chunk with a
-    // vector hit strong enough to survive. Both groups present → up to 5
-    // code (3 survive) then up to 5 prose (1 survives), code first.
+  it("quota split: ratio-based, code-heavy store gets proportionally more code slots", async () => {
+    // Store: 4 code vectors vs 1 prose vector → share 0.8 → code quota
+    // round(5·0.8)=4, prose 1 (total 5). 3 code chunks survive the hybrid>0
+    // filter (the bm25 minimum is dropped) + 1 prose chunk → 4 results:
+    // 3 code then 1 prose; the unfilled code slot finds no more qualifying
+    // code hits, and the prose group has nothing left either.
     // (The mocked embedder returns non-normalized vectors, so all KNN
     // cosines clamp to 0 — survival therefore rides on bm25 here.)
     const db = createTestDb([
@@ -1235,6 +1237,31 @@ describe("hybridSearch dual-space policy (per-space embed gating, code hits pref
     expect(results[3].sources).toContain("nomic");
   });
 
+  it("quota split: unfilled quota flows to the other group so the total stays 5", async () => {
+    // Store ratio 4 code : 3 prose vectors → quotas 3/2. Qualifying hits:
+    // only 2 code (f.ts is the bm25 minimum → dropped; e.ts has no FTS
+    // match at all but its vector still counts toward the ratio) vs 3
+    // prose → code shortfall 1 filled by the third prose chunk →
+    // 5 total = 2 code + 3 prose. All chunk lengths are distinct so no
+    // bm25 ties collapse survivors.
+    const db = createTestDb([
+      { file: "/src/a.ts", content: "payment refund processing payment refund processing", codeVector: vec(0) },
+      { file: "/src/b.ts", content: "payment refund processing beta utilities module functions", codeVector: vec(1) },
+      { file: "/src/e.ts", content: "unrelated compute square root math helpers", codeVector: vec(2) },
+      { file: "/src/f.ts", content: "payment refund processing ledger audit trail records archive notes appendices", codeVector: vec(3) },
+      { file: "/src/n1.md", content: "payment refund processing gateway transaction overview alpha", vector: vec(4) },
+      { file: "/src/n2.md", content: "payment refund processing gateway transaction overview alpha beta", vector: vec(5) },
+      { file: "/src/n3.md", content: "payment refund processing gateway transaction overview alpha beta gamma", vector: vec(6) },
+    ]);
+    const results = await hybridSearch("payment refund processing", 10, 0.5, db);
+    db.close();
+    expect(results.length).toBe(5);
+    const codeResults = results.filter(r => r.sources.includes("jina-code"));
+    const proseResults = results.filter(r => !r.sources.includes("jina-code"));
+    expect(codeResults.length).toBe(2);
+    expect(proseResults.length).toBe(3);
+  });
+
   it("quota split: single prose group capped at 5 regardless of limit", async () => {
     const chunks = Array.from({ length: 10 }, (_, i) => ({
       content: `payment refund processing filler${i} ${"pad word ".repeat(i)}`,
@@ -1245,9 +1272,9 @@ describe("hybridSearch dual-space policy (per-space embed gating, code hits pref
     expect(results.length).toBe(5);
   });
 
-  it("limit caps each group's quota, not the combined total", async () => {
-    // limit=3 with both groups present → up to 3 code + up to 3 prose;
-    // 3 code + 1 prose survive the filter → 4 results, prose still last.
+  it("limit shrinks the total, quotas re-split on the smaller total", async () => {
+    // Ratio 4:1 → total min(3,5)=3 → code round(3·0.8)=2 (clamped ≤ 2),
+    // prose 1. 3 code + 1 prose qualify → 2 code + 1 prose = 3 results.
     const db = createTestDb([
       { file: "/src/a.ts", content: "payment refund processing payment refund processing", codeVector: vec(0) },
       { file: "/src/b.ts", content: "payment refund processing beta utilities", codeVector: vec(1) },
@@ -1257,9 +1284,9 @@ describe("hybridSearch dual-space policy (per-space embed gating, code hits pref
     ]);
     const results = await hybridSearch("payment refund processing", 3, 0.5, db);
     db.close();
-    expect(results.length).toBe(4);
-    expect(results.slice(0, 3).every(r => r.sources.includes("jina-code"))).toBe(true);
-    expect(results[3].chunk.file).toBe("/src/notes.md");
+    expect(results.length).toBe(3);
+    expect(results.slice(0, 2).every(r => r.sources.includes("jina-code"))).toBe(true);
+    expect(results[2].chunk.file).toBe("/src/notes.md");
   });
 
   // The gating tests spy on embedQueryFor to observe which models actually
@@ -1317,6 +1344,25 @@ describe("hybridSearch dual-space policy (per-space embed gating, code hits pref
     } finally {
       embedSpy.mockRestore();
     }
+  });
+});
+
+describe("splitResultQuotas (ratio math)", () => {
+  it("splits proportionally with integer quotas summing to the total", () => {
+    expect(splitResultQuotas(5, 43, 16)).toEqual({ codeQuota: 4, proseQuota: 1 }); // share .729 → 3.64 → 4
+    expect(splitResultQuotas(5, 16, 43)).toEqual({ codeQuota: 1, proseQuota: 4 });
+    expect(splitResultQuotas(5, 30, 30)).toEqual({ codeQuota: 3, proseQuota: 2 }); // .5 → 2.5 rounds up for code
+    expect(splitResultQuotas(5, 1, 1)).toEqual({ codeQuota: 3, proseQuota: 2 });
+  });
+  it("enforces a minimum of 1 per group even at extreme ratios", () => {
+    expect(splitResultQuotas(5, 9999, 1)).toEqual({ codeQuota: 4, proseQuota: 1 });
+    expect(splitResultQuotas(5, 1, 9999)).toEqual({ codeQuota: 1, proseQuota: 4 });
+  });
+  it("total of 1 goes entirely to the code group (code-first)", () => {
+    expect(splitResultQuotas(1, 1, 99)).toEqual({ codeQuota: 1, proseQuota: 0 });
+  });
+  it("zero vectors on both sides splits evenly", () => {
+    expect(splitResultQuotas(5, 0, 0)).toEqual({ codeQuota: 3, proseQuota: 2 });
   });
 });
 

@@ -3,9 +3,10 @@
  * independent embedding spaces (prose/nomic and code/jina), merged with a
  * per-query blend weight. Each space's query is embedded only when that
  * space has stored vectors; results are a ratio-based quota split — the
- * total (5, capped by `limit`) is divided between code and prose in
- * proportion to each space's stored vector count, integer quotas with a
- * minimum of 1 per group when both qualify.
+ * total (7 when both spaces store vectors, else 5, capped by `limit`) is
+ * divided between code and prose in proportion to each space's stored
+ * vector count, integer quotas with a minimum of 1 per group when both
+ * qualify.
  */
 import type { DatabaseSync } from "node:sqlite";
 import { embedQueryFor } from "./embedding.ts";
@@ -71,11 +72,19 @@ function l2DistanceToCosine(l2Distance: number): number {
 }
 
 /**
- * Total number of result slots when both groups qualify (or a single
- * group fills the result alone). `limit` can only shrink this, never
- * grow it.
+ * Total number of result slots when at most one embedding space has
+ * stored vectors (or a single group fills the result alone). `limit` can
+ * only shrink this, never grow it.
  */
 export const RESULT_TOTAL_QUOTA = 5;
+
+/**
+ * Result-slot total for stores with vectors in both embedding spaces —
+ * a mixed corpus has two groups to fill, so more hits feed the
+ * ratio-based quota split. Same rule as RESULT_TOTAL_QUOTA otherwise:
+ * `limit` can only shrink it.
+ */
+export const RESULT_TOTAL_QUOTA_DUAL_SPACE = 7;
 
 /**
  * Split `total` result slots between the code and prose groups in
@@ -105,12 +114,13 @@ export function splitResultQuotas(
  * no vectors is skipped entirely (no query embedding, no KNN).
  *
  * Result selection is a ratio-based quota split: the result totals
- * RESULT_TOTAL_QUOTA (5, capped by `limit`) and is split between code
- * and prose proportionally to each space's stored vector count —
- * integer quotas summing exactly to the total, at least 1 per group
- * when both qualify, code group first. A group that can't fill its
- * quota yields the slack to the other group's next-best hits; when only
- * one group qualifies it takes the whole total.
+ * RESULT_TOTAL_QUOTA_DUAL_SPACE (7) when both spaces store vectors,
+ * else RESULT_TOTAL_QUOTA (5) — either way capped by `limit` — and is
+ * split between code and prose proportionally to each space's stored
+ * vector count — integer quotas summing exactly to the total, at least
+ * 1 per group when both qualify, code group first. A group that can't
+ * fill its quota yields the slack to the other group's next-best hits;
+ * when only one group qualifies it takes the whole total.
  */
 export async function hybridSearch(
   query: string,
@@ -260,7 +270,9 @@ export async function hybridSearch(
   }
 
   // Result selection is a ratio-based quota split: the result totals
-  // RESULT_TOTAL_QUOTA (5, capped by `limit`), divided between the code
+  // RESULT_TOTAL_QUOTA_DUAL_SPACE (7) when both spaces store vectors,
+  // else RESULT_TOTAL_QUOTA (5) — capped by `limit` either way —
+  // divided between the code
   // and prose groups in proportion to the store's per-space vector
   // counts — integer quotas summing exactly to the total, at least 1 per
   // group when both qualify, code group first (a code hit outranks a
@@ -276,7 +288,11 @@ export async function hybridSearch(
   const codeHits = ranked.filter(isCodeHit);
   const proseHits = ranked.filter(scored => !isCodeHit(scored));
 
-  const total = Math.min(limit, RESULT_TOTAL_QUOTA);
+  const bothSpacesHaveVectors = codeVectorCount > 0 && proseVectorCount > 0;
+  const total = Math.min(
+    limit,
+    bothSpacesHaveVectors ? RESULT_TOTAL_QUOTA_DUAL_SPACE : RESULT_TOTAL_QUOTA,
+  );
 
   if (codeHits.length > 0 && proseHits.length > 0) {
     const { codeQuota, proseQuota } = splitResultQuotas(total, codeVectorCount, proseVectorCount);

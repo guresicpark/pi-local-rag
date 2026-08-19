@@ -9,7 +9,7 @@ Local hybrid RAG pipeline for the [Pi coding agent](https://github.com/badlogic/
 **Embedding models**
 
 - Switched from `Xenova/all-MiniLM-L6-v2` (384-dim, ~23 MB) to `nomic-ai/nomic-embed-text-v1.5` (768-dim, q8, ~111 MB) with the required `search_query:` / `search_document:` task prefixes; existing stores auto-migrate
-- Dual-model embedding: code files → `jinaai/jina-embeddings-v2-base-code` (768-dim, ~170 MB), prose/data/docs → nomic; vectors in separate `sqlite-vec` tables, hybrid search embeds the query per model (only when that model's space has vectors) and ranks by absolute cosine similarity (shared scale across spaces); results always total 5, split between code and prose in proportion to each space's stored vector count (integer quotas, minimum 1 per group when both qualify, unfilled quota flows to the other group). Each model gets input tailored to its strength — nomic uses its asymmetric `search_query:`/`search_document:` prefixes, and code chunks are embedded with their file basename prepended (jina-code was trained on code-with-context pairs)
+- Dual-model embedding: code files → `jinaai/jina-embeddings-v2-base-code` (768-dim, ~170 MB), prose/data/docs → nomic; vectors in separate `sqlite-vec` tables, hybrid search embeds the query per model (only when that model's space has vectors) and ranks by absolute cosine similarity (shared scale across spaces); results total 7 when both spaces store vectors (5 otherwise), split between code and prose in proportion to each space's stored vector count (integer quotas, minimum 1 per group when both qualify, unfilled quota flows to the other group). Each model gets input tailored to its strength — nomic uses its asymmetric `search_query:`/`search_document:` prefixes, and code chunks are embedded with their file basename prepended (jina-code was trained on code-with-context pairs)
 - `/rag ext` commands now take an optional `[code|text]` group; new `extraCodeExtensions` config field
 
 **Reliability & security fixes**
@@ -36,8 +36,8 @@ Local hybrid RAG pipeline for the [Pi coding agent](https://github.com/badlogic/
 
 ## Features
 
-- **Hybrid BM25 + vector search** — SQLite FTS5 for keyword scoring, [`sqlite-vec`](https://github.com/asg017/sqlite-vec) for 768-dim cosine NN (per model: a space is queried only when it has vectors), blended at retrieval time; results total 5, split between code and prose by each space's stored-vector ratio (min 1 per group when both qualify)
-- **Dual local ONNX embeddings** — code files are embedded by `jinaai/jina-embeddings-v2-base-code` (~170 MB quantized, trained on code + docstrings); everything else (prose, Markdown, data/config, PDF/DOCX/HTML) by `nomic-ai/nomic-embed-text-v1.5` (~111 MB quantized). Vectors live in separate `sqlite-vec` tables; each space is queried only when it has vectors, ranked by absolute cosine similarity (shared scale), and results total 5 split between code and prose by each space's stored-vector ratio — all fully offline after first download
+- **Hybrid BM25 + vector search** — SQLite FTS5 for keyword scoring, [`sqlite-vec`](https://github.com/asg017/sqlite-vec) for 768-dim cosine NN (per model: a space is queried only when it has vectors), blended at retrieval time; results total 7 when both vector spaces are populated (5 otherwise), split between code and prose by each space's stored-vector ratio (min 1 per group when both qualify)
+- **Dual local ONNX embeddings** — code files are embedded by `jinaai/jina-embeddings-v2-base-code` (~170 MB quantized, trained on code + docstrings); everything else (prose, Markdown, data/config, PDF/DOCX/HTML) by `nomic-ai/nomic-embed-text-v1.5` (~111 MB quantized). Vectors live in separate `sqlite-vec` tables; each space is queried only when it has vectors, ranked by absolute cosine similarity (shared scale), and results total 7 in dual-space stores (5 otherwise) split between code and prose by each space's stored-vector ratio — all fully offline after first download
 - **Many file formats** — text, source code, Markdown, JSON, YAML, plus PDF (with optional OCR fallback for scanned docs), DOCX, HTML (auto-converted to Markdown)
 - **Per-project storage** — walks up from cwd looking for `.pi/rag/`; falls back to `~/.pi/rag/` global store
 - **Tracked paths + exclude patterns** — `/rag index <path>` remembers what to keep current; gitignore-style `/rag exclude` for `dist/`, `*.log`, etc.
@@ -190,7 +190,7 @@ Auto-injection is **off by default**. It turns itself on only when the store act
 | Setting | Default | Description |
 |---|---|---|
 | `ragEnabled` | `false` | Auto-inject context before each turn (auto-enabled once the store has chunks) |
-| `ragTopK` | `5` | Max chunks to inject |
+| `ragTopK` | `5` | Max chunks to inject (caps the search total: 7 in dual-space stores, else 5) |
 | `ragScoreThreshold` | `0.1` | Min hybrid score to include |
 | `ragAlpha` | `0.4` | BM25/vector blend (0 = pure vector, 1 = pure BM25) |
 | `extraExtensions` | `[]` | Extra text-group extensions to index beyond the defaults |

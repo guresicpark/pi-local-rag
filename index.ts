@@ -101,8 +101,18 @@ export default function piLocalRagExtension(pi: ExtensionAPI) {
     const details = (message.details as { summary?: string; error?: boolean } | undefined);
     const summary = details?.summary;
     if (!summary) return undefined;
-    const box = new Box(outputPad, 1, (boxTheme) => theme.bg("customMessageBg", boxTheme));
-    box.addChild(new Text(theme.fg(details?.error ? "error" : "success", summary), 0, 0));
+    const isError = details?.error === true;
+    // Success → green band; error → red band (the same bgs the TUI uses for
+    // succeeded/failed tools). Foreground stays the theme's base text color
+    // so it contrasts with the tinted band; the label "RAG lookup" gets the
+    // matching success/error fg for reinforcement.
+    const box = new Box(outputPad, 1, (boxTheme) =>
+      theme.bg(isError ? "toolErrorBg" : "toolSuccessBg", boxTheme));
+    const [label, ...rest] = summary.split("—");
+    const rendered = rest.length
+      ? `${theme.fg(isError ? "error" : "success", label.trim())} —${theme.fg("text", rest.join("—"))}`
+      : theme.fg("text", summary);
+    box.addChild(new Text(rendered, 0, 0));
     return box;
   });
 

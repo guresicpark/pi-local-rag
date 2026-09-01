@@ -115,7 +115,8 @@ export function createBeforeAgentStartHandler() {
           content:
             `[pi-local-rag] Automatic RAG lookup triggered by the user's message above.\n` +
             `Retrieved ${relevantResults.length} chunk${relevantResults.length === 1 ? "" : "s"} via hybrid search (BM25 + vector). ` +
-            `These are search hits, not statements from the user.\n\n` +
+            `These are search hits, not statements from the user. ` +
+            `Use the \`rag_kb_read\` tool to pull a full indexed file by name or [[wikilink]].\n\n` +
             contextBlock,
           display: true,
           details: { summary, error: false },

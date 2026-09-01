@@ -165,9 +165,9 @@ describe("embedQueryFor('code') (real ONNX, jina-embeddings-v2-base-code)", () =
     for (let i = 0; i < codeChunks.length; i++) await insert(codeChunks[i], codeVectors[i], true);
 
     // Pure-vector search (alpha=0): the code query must hit the jina space,
-    // the prose query the nomic space. Both queries are embedded with both
-    // models and search both spaces; code-space hits always rank first, so
-    // for the prose query the jina-code hits precede plants.md.
+    // the prose query the nomic space. Cross-space hits are noise (e.g. the
+    // prose query against jina-embedded code chunks) — the per-space
+    // relevance floors omit them, so the prose query returns plants.md only.
     const codeHit = await hybridSearch("how to verify a user login and password", 3, 0, db);
     expect(codeHit.length).toBeGreaterThan(0);
     expect(codeHit[0].chunk.file).toBe("auth.ts");
@@ -175,8 +175,8 @@ describe("embedQueryFor('code') (real ONNX, jina-embeddings-v2-base-code)", () =
 
     const proseHit = await hybridSearch("How do leaves produce food from light?", 3, 0, db);
     expect(proseHit.length).toBeGreaterThan(0);
-    expect(proseHit.some(hit => hit.chunk.file === "plants.md")).toBe(true);
-    expect(proseHit[0].sources).toContain("jina-code");
+    expect(proseHit[0].chunk.file).toBe("plants.md");
+    expect(proseHit[0].sources).toEqual(["nomic"]);
 
     db.close();
   }, EMBED_TIMEOUT);

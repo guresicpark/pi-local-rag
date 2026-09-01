@@ -19,7 +19,7 @@ export interface RagConfig {
   ragEnabled: boolean;
   /** Maximum number of chunks injected per turn. */
   ragTopK: number;
-  /** Minimum hybrid score a chunk needs to be injected. */
+  /** Minimum hybrid score a chunk needs to be injected (the engine already floors results; this can only raise the bar). */
   ragScoreThreshold: number;
   /** Hybrid blend weight: 0 = pure vector, 1 = pure BM25. */
   ragAlpha: number;
@@ -51,7 +51,7 @@ export function defaultConfig(): RagConfig {
   return {
     ragEnabled: false,
     ragTopK: 5,
-    ragScoreThreshold: 0.1,
+    ragScoreThreshold: 0.4,
     ragAlpha: 0.4,
     extraExtensions: [],
     extraCodeExtensions: [],

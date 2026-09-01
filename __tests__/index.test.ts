@@ -1181,13 +1181,17 @@ describe("hybridSearch source attribution", () => {
 
 describe("hybridSearch dual-space policy (per-space embed gating, code hits preferred)", () => {
   const vec = (seed: number) => Array.from({ length: 768 }, (_, i) => (i === seed ? 1 : 0));
+  // Identical to the mocked query embedding → cosine 1.0 → hybrid ≥ 0.5,
+  // clearing the per-space relevance floors regardless of bm25.
+  const uni = () => new Array(768).fill(0.1);
 
   it("code vector hits rank above prose vector hits even when the prose hit scores higher", async () => {
-    // audit.ts is the bm25 minimum → normalized to 0 → dropped by the
-    // hybrid > 0 filter; it exists only so ledger.ts's normalized bm25 > 0.
+    // audit.ts has no vector and is the bm25 minimum → hybrid 0 → dropped
+    // by the relevance floor; it exists only so ledger.ts's normalized
+    // bm25 > 0.
     const db = createTestDb([
-      { file: "/src/prose.md", content: "payment refund processing payment refund processing", vector: vec(1) },
-      { file: "/src/ledger.ts", content: "function payment refund processing helper utilities module", codeVector: vec(0) },
+      { file: "/src/prose.md", content: "payment refund processing payment refund processing", vector: uni() },
+      { file: "/src/ledger.ts", content: "function payment refund processing helper utilities module", codeVector: uni() },
       { file: "/src/audit.ts", content: "function payment refund processing ledger audit trail records archive", codeVector: vec(2) },
     ]);
     const results = await hybridSearch("payment refund processing", 10, 0.5, db);
@@ -1217,43 +1221,40 @@ describe("hybridSearch dual-space policy (per-space embed gating, code hits pref
   it("quota split: ratio-based, code-heavy store gets proportionally more code slots", async () => {
     // Store: 4 code vectors vs 1 prose vector → both spaces present →
     // total min(10,7)=7, share 0.8 → code quota round(7·0.8)=6, prose 1.
-    // 3 code chunks survive the hybrid>0 filter (the bm25 minimum is
-    // dropped) + 1 prose chunk → 4 results: 3 code then 1 prose; the
-    // unfilled code slots find no more qualifying code hits, and the
-    // prose group has nothing left either.
-    // (The mocked embedder returns non-normalized vectors, so all KNN
-    // cosines clamp to 0 — survival therefore rides on bm25 here.)
+    // All 5 chunks carry query-matching vectors, so every hybrid clears
+    // the per-space floors (bm25 only shifts ranking) → 4 code then 1
+    // prose; the unfilled code slots find no more qualifying code hits,
+    // and the prose group has nothing left either.
     const db = createTestDb([
-      { file: "/src/a.ts", content: "payment refund processing payment refund processing", codeVector: vec(0) },
-      { file: "/src/b.ts", content: "payment refund processing beta utilities", codeVector: vec(1) },
-      { file: "/src/c.ts", content: "payment refund processing gamma helper functions", codeVector: vec(2) },
-      { file: "/src/d.ts", content: "payment refund processing delta ledger audit trail records archive notes", codeVector: vec(3) },
-      { file: "/src/notes.md", content: "payment refund processing gateway transaction overview", vector: vec(4) },
+      { file: "/src/a.ts", content: "payment refund processing payment refund processing", codeVector: uni() },
+      { file: "/src/b.ts", content: "payment refund processing beta utilities", codeVector: uni() },
+      { file: "/src/c.ts", content: "payment refund processing gamma helper functions", codeVector: uni() },
+      { file: "/src/d.ts", content: "payment refund processing delta ledger audit trail records archive notes", codeVector: uni() },
+      { file: "/src/notes.md", content: "payment refund processing gateway transaction overview", vector: uni() },
     ]);
     const results = await hybridSearch("payment refund processing", 10, 0.5, db);
     db.close();
-    expect(results.length).toBe(4);
-    expect(results.slice(0, 3).every(r => r.sources.includes("jina-code"))).toBe(true);
-    expect(results[3].chunk.file).toBe("/src/notes.md");
-    expect(results[3].sources).toContain("nomic");
+    expect(results.length).toBe(5);
+    expect(results.slice(0, 4).every(r => r.sources.includes("jina-code"))).toBe(true);
+    expect(results[4].chunk.file).toBe("/src/notes.md");
+    expect(results[4].sources).toContain("nomic");
   });
 
   it("quota split: dual-space store widens the result total from 5 to 7", async () => {
     // Both vector spaces populated → total min(10,7)=7 (a single-space
     // store keeps RESULT_TOTAL_QUOTA=5). Store ratio 5 code : 3 prose
-    // vectors → quotas round(7·5/8)=4 / 3. Qualifying hits: 4 code
-    // (f.ts is the bm25 minimum → dropped; its vector still counts
-    // toward the ratio) + 3 prose → exact quota fill, 4 code then
-    // 3 prose = 7.
+    // vectors → quotas round(7·5/8)=4 / 3. All 8 chunks carry
+    // query-matching vectors, so all clear the per-space floors — the
+    // quota split itself caps the result at 4 code + 3 prose = 7.
     const db = createTestDb([
-      { file: "/src/a.ts", content: "payment refund processing payment refund processing", codeVector: vec(0) },
-      { file: "/src/b.ts", content: "payment refund processing beta utilities module functions", codeVector: vec(1) },
-      { file: "/src/c.ts", content: "payment refund processing gamma helper functions", codeVector: vec(2) },
-      { file: "/src/g.ts", content: "payment refund processing gamma helper functions module", codeVector: vec(3) },
-      { file: "/src/f.ts", content: "payment refund processing ledger audit trail records archive notes appendices supplements exhibits", codeVector: vec(4) },
-      { file: "/src/n1.md", content: "payment refund processing gateway transaction overview alpha", vector: vec(5) },
-      { file: "/src/n2.md", content: "payment refund processing gateway transaction overview alpha beta", vector: vec(6) },
-      { file: "/src/n3.md", content: "payment refund processing gateway transaction overview alpha beta gamma", vector: vec(7) },
+      { file: "/src/a.ts", content: "payment refund processing payment refund processing", codeVector: uni() },
+      { file: "/src/b.ts", content: "payment refund processing beta utilities module functions", codeVector: uni() },
+      { file: "/src/c.ts", content: "payment refund processing gamma helper functions", codeVector: uni() },
+      { file: "/src/g.ts", content: "payment refund processing gamma helper functions module", codeVector: uni() },
+      { file: "/src/f.ts", content: "payment refund processing ledger audit trail records archive notes appendices supplements exhibits", codeVector: uni() },
+      { file: "/src/n1.md", content: "payment refund processing gateway transaction overview alpha", vector: uni() },
+      { file: "/src/n2.md", content: "payment refund processing gateway transaction overview alpha beta", vector: uni() },
+      { file: "/src/n3.md", content: "payment refund processing gateway transaction overview alpha beta gamma", vector: uni() },
     ]);
     const results = await hybridSearch("payment refund processing", 10, 0.5, db);
     db.close();
@@ -1264,24 +1265,22 @@ describe("hybridSearch dual-space policy (per-space embed gating, code hits pref
   });
 
   it("quota split: unfilled quota flows to the other group so the total stays filled", async () => {
-    // Store ratio 4 code : 3 prose vectors → both spaces present →
-    // total 7, quotas round(7·4/7)=4 / 3. Qualifying hits: only 2 code
-    // (f.ts is the bm25 minimum → dropped; e.ts has no FTS match at all
-    // but its vector still counts toward the ratio) vs 5 prose (three
-    // vector hits + two bm25-only hits, which rank with the prose
-    // group) → code shortfall 2 filled by the fourth and fifth prose
-    // chunks → 7 total = 2 code + 5 prose. All chunk lengths are
-    // distinct so no bm25 ties collapse survivors.
+    // Store ratio 4 code : 5 prose vectors → both spaces present →
+    // total 7, quotas round(7·4/9)=3 / 4. Qualifying hits: only 2 code
+    // (a.ts, b.ts — e.ts has no FTS match and a one-hot vector that
+    // clamps to cosine 0 → hybrid 0; f.ts is the bm25 minimum, also 0)
+    // vs 5 prose → code shortfall 2 filled by the fourth and fifth prose
+    // chunks → 7 total = 2 code + 5 prose.
     const db = createTestDb([
-      { file: "/src/a.ts", content: "payment refund processing payment refund processing", codeVector: vec(0) },
-      { file: "/src/b.ts", content: "payment refund processing beta utilities module functions", codeVector: vec(1) },
+      { file: "/src/a.ts", content: "payment refund processing payment refund processing", codeVector: uni() },
+      { file: "/src/b.ts", content: "payment refund processing beta utilities module functions", codeVector: uni() },
       { file: "/src/e.ts", content: "unrelated compute square root math helpers", codeVector: vec(2) },
       { file: "/src/f.ts", content: "payment refund processing ledger audit trail records archive notes appendices supplements exhibits", codeVector: vec(3) },
-      { file: "/src/n1.md", content: "payment refund processing gateway transaction overview alpha", vector: vec(4) },
-      { file: "/src/n2.md", content: "payment refund processing gateway transaction overview alpha beta", vector: vec(5) },
-      { file: "/src/n3.md", content: "payment refund processing gateway transaction overview alpha beta gamma", vector: vec(6) },
-      { file: "/src/n4.md", content: "payment refund processing gateway transaction overview alpha beta gamma delta" },
-      { file: "/src/n5.md", content: "payment refund processing gateway transaction overview alpha beta gamma delta epsilon" },
+      { file: "/src/n1.md", content: "payment refund processing gateway transaction overview alpha", vector: uni() },
+      { file: "/src/n2.md", content: "payment refund processing gateway transaction overview alpha beta", vector: uni() },
+      { file: "/src/n3.md", content: "payment refund processing gateway transaction overview alpha beta gamma", vector: uni() },
+      { file: "/src/n4.md", content: "payment refund processing gateway transaction overview alpha beta gamma delta", vector: uni() },
+      { file: "/src/n5.md", content: "payment refund processing gateway transaction overview alpha beta gamma delta epsilon", vector: uni() },
     ]);
     const results = await hybridSearch("payment refund processing", 10, 0.5, db);
     db.close();
@@ -1304,13 +1303,14 @@ describe("hybridSearch dual-space policy (per-space embed gating, code hits pref
 
   it("limit shrinks the total, quotas re-split on the smaller total", async () => {
     // Ratio 4:1 → total min(3,7)=3 → code round(3·0.8)=2 (clamped ≤ 2),
-    // prose 1. 3 code + 1 prose qualify → 2 code + 1 prose = 3 results.
+    // prose 1. All 5 chunks clear the per-space floors (query-matching
+    // vectors), but the limit-3 quota split selects 2 code + 1 prose.
     const db = createTestDb([
-      { file: "/src/a.ts", content: "payment refund processing payment refund processing", codeVector: vec(0) },
-      { file: "/src/b.ts", content: "payment refund processing beta utilities", codeVector: vec(1) },
-      { file: "/src/c.ts", content: "payment refund processing gamma helper functions", codeVector: vec(2) },
-      { file: "/src/d.ts", content: "payment refund processing delta ledger audit trail records archive notes", codeVector: vec(3) },
-      { file: "/src/notes.md", content: "payment refund processing gateway transaction overview", vector: vec(4) },
+      { file: "/src/a.ts", content: "payment refund processing payment refund processing", codeVector: uni() },
+      { file: "/src/b.ts", content: "payment refund processing beta utilities", codeVector: uni() },
+      { file: "/src/c.ts", content: "payment refund processing gamma helper functions", codeVector: uni() },
+      { file: "/src/d.ts", content: "payment refund processing delta ledger audit trail records archive notes", codeVector: uni() },
+      { file: "/src/notes.md", content: "payment refund processing gateway transaction overview", vector: uni() },
     ]);
     const results = await hybridSearch("payment refund processing", 3, 0.5, db);
     db.close();
@@ -1485,7 +1485,7 @@ describe("Storage (loadConfig/saveConfig/loadIndex/saveIndex/ensureDir)", () => 
     const cfg = loadConfig();
     expect(cfg.ragEnabled).toBe(false);
     expect(cfg.ragTopK).toBe(5);
-    expect(cfg.ragScoreThreshold).toBe(0.1);
+    expect(cfg.ragScoreThreshold).toBe(0.4);
     expect(cfg.ragAlpha).toBe(0.4);
     expect(cfg.extraExtensions).toEqual([]);
     expect(cfg.extraCodeExtensions).toEqual([]);

@@ -192,7 +192,7 @@ Auto-injection is **off by default**. It turns itself on only when the store act
 |---|---|---|
 | `ragEnabled` | `false` | Auto-inject context before each turn (auto-enabled once the store has chunks) |
 | `ragTopK` | `5` | Max chunks to inject (caps the search total: 7 in dual-space stores, else 5) |
-| `ragScoreThreshold` | `0.1` | Min hybrid score to include |
+| `ragScoreThreshold` | `0.4` | Min hybrid score to include (the engine already floors per-space: 0.4 text/BM25, 0.35 code — this can only raise the bar) |
 | `ragAlpha` | `0.4` | BM25/vector blend (0 = pure vector, 1 = pure BM25) |
 | `extraExtensions` | `[]` | Extra text-group extensions to index beyond the defaults |
 | `extraCodeExtensions` | `[]` | Extra code-group extensions (embedded by the code model) |

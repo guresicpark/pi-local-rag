@@ -79,6 +79,23 @@ function l2DistanceToCosine(l2Distance: number): number {
 export const RESULT_TOTAL_QUOTA = 5;
 
 /**
+ * Minimum hybrid score per embedding space — anything below is treated as
+ * unrelated and omitted, so a query with one related file returns just that
+ * file instead of padding the list with noise. Calibrated on real indexes:
+ *
+ * - jina-code space (116k-chunk Shopware store): unrelated queries top out
+ *   at ~0.28-0.33, genuinely related code hits start at ~0.38 (vague
+ *   queries) and run to 0.63+ (keyword matches)
+ * - nomic space + BM25-only hits (8782-chunk docs store): unrelated tops
+ *   out at ~0.31-0.39 (anisotropy baseline, cos ~0.52 x (1 - alpha)),
+ *   related starts at ~0.65. 0.4 is also exactly the ceiling of a pure
+ *   keyword-only match (alpha x bm25=1 + (1-alpha) x cos~0), so those
+ *   always survive.
+ */
+export const MIN_HYBRID_SCORE_CODE = 0.35;
+export const MIN_HYBRID_SCORE_TEXT = 0.4;
+
+/**
  * Result-slot total for stores with vectors in both embedding spaces —
  * a mixed corpus has two groups to fill, so more hits feed the
  * ratio-based quota split. Same rule as RESULT_TOTAL_QUOTA otherwise:
@@ -282,8 +299,13 @@ export async function hybridSearch(
   // BM25 rank with the prose group. Within a group, order is by hybrid
   // score. When only one group qualifies, it takes the whole total.
   const isCodeHit = (scored: ScoredChunk) => scored.sources.includes("jina-code");
+  // Per-space relevance floor — see MIN_HYBRID_SCORE_CODE/TEXT above. A
+  // candidate's space is whichever embedding engine surfaced it; BM25-only
+  // hits ride the text floor (their keyword-match ceiling is exactly 0.4).
+  const minScoreFor = (scored: ScoredChunk) =>
+    isCodeHit(scored) ? MIN_HYBRID_SCORE_CODE : MIN_HYBRID_SCORE_TEXT;
   const ranked = scoredResults
-    .filter(scored => scored.hybrid > 0)
+    .filter(scored => scored.hybrid > 0 && scored.hybrid >= minScoreFor(scored))
     .sort((a, b) => b.hybrid - a.hybrid);
   const codeHits = ranked.filter(isCodeHit);
   const proseHits = ranked.filter(scored => !isCodeHit(scored));

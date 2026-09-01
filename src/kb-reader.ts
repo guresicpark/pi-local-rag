@@ -1,5 +1,5 @@
 /**
- * kb_read resolver — map a human-typed note reference to an indexed file.
+ * rag_kb_read resolver — map a human-typed note reference to an indexed file.
  *
  * Ported from pi-knowledge-search's kb-reader.ts (see that project's
  * LICENSE) and adapted to pi-local-rag's storage: the SQLite files table

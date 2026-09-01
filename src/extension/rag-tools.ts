@@ -1,6 +1,6 @@
 /**
- * Model-facing tools: rag_index, rag_query, rag_status. Thin wrappers
- * around the same core functions the /rag commands use, returning
+ * Model-facing tools: rag_index, rag_query, rag_status, rag_kb_read. Thin
+ * wrappers around the same core functions the /rag commands use, returning
  * plain-text results for the model.
  */
 import { existsSync } from "node:fs";
@@ -19,11 +19,11 @@ import { BINARY_DOC_EXTS } from "../constants.ts";
 import { storeScope, displayPath } from "./paths.ts";
 
 /** Default note-like extensions when the effective allowlist is empty. */
-const KB_READ_FALLBACK_EXTS = [".md", ".txt"];
-/** Read cap for kb_read (post-UTF8 bytes). Mirrors the pi-knowledge-search default. */
-const KB_READ_MAX_BYTES = 64 * 1024;
+const RAG_KB_READ_FALLBACK_EXTS = [".md", ".txt"];
+/** Read cap for rag_kb_read (post-UTF8 bytes). Mirrors the pi-knowledge-search default. */
+const RAG_KB_READ_MAX_BYTES = 64 * 1024;
 
-/** Register all three RAG tools on the extension API. */
+/** Register all four RAG tools on the extension API. */
 export function registerRagTools(pi: Pick<ExtensionAPI, "registerTool">) {
   pi.registerTool({
     name: "rag_index",
@@ -139,12 +139,12 @@ export function registerRagTools(pi: Pick<ExtensionAPI, "registerTool">) {
   });
 
   pi.registerTool({
-    name: "kb_read",
+    name: "rag_kb_read",
     label: "KB Read",
     description:
       "Read an indexed file from the pi-local-rag knowledge base by name, relative path, or [[wikilink]]. Resolves fuzzy references without needing an absolute path — use this when you know a file's name but not its full path on disk. PDF/DOCX/HTML files are decoded to text.",
     promptGuidelines: [
-      "Use kb_read when a file is referenced by name or [[wikilink]] — don't run find/grep first.",
+      "Use rag_kb_read when a file is referenced by name or [[wikilink]] — don't run find/grep first.",
       "Use the standard `read` tool for non-indexed files or when you already have an absolute path.",
     ],
     parameters: Type.Object({
@@ -172,7 +172,7 @@ export function registerRagTools(pi: Pick<ExtensionAPI, "registerTool">) {
           cwd,
         });
         const result = resolveNote(params.name, indexedFiles, {
-          fileExtensions: fileExtensions.length ? fileExtensions : KB_READ_FALLBACK_EXTS,
+          fileExtensions: fileExtensions.length ? fileExtensions : RAG_KB_READ_FALLBACK_EXTS,
           cwd,
         });
         return { empty: false as const, result };
@@ -208,7 +208,7 @@ export function registerRagTools(pi: Pick<ExtensionAPI, "registerTool">) {
             type: "text" as const,
             text:
               `"${result.normalizedRef}" is ambiguous. ${result.matches.length} candidates:\n\n${listed}\n\n` +
-              `Call kb_read again with a more specific path (e.g. the exact relative path) to disambiguate.`,
+              `Call rag_kb_read again with a more specific path (e.g. the exact relative path) to disambiguate.`,
           }],
           details: { candidates: result.matches.map((m) => m.absPath) },
         };
@@ -236,7 +236,7 @@ export function registerRagTools(pi: Pick<ExtensionAPI, "registerTool">) {
       // the reason so the agent can decide whether to trust the result or refine
       // the reference. High-confidence tiers are resolved silently.
       const fuzzyNote = !result.unique
-        ? `\n\n_(fuzzy match via ${match.reason} — if this isn't the file you meant, re-run kb_read with a more specific path)_`
+        ? `\n\n_(fuzzy match via ${match.reason} — if this isn't the file you meant, re-run rag_kb_read with a more specific path)_`
         : "";
       const header = `# ${display}${section}${truncNote}${fuzzyNote}\n\n`;
 
@@ -252,7 +252,7 @@ export function registerRagTools(pi: Pick<ExtensionAPI, "registerTool">) {
 }
 
 /**
- * Read an indexed file for kb_read. Binary documents (PDF/DOCX) and HTML go
+ * Read an indexed file for rag_kb_read. Binary documents (PDF/DOCX) and HTML go
  * through extractText() so the model gets decoded content instead of raw
  * bytes; plain text files are read with the UTF-8-safe readNote().
  */
@@ -262,7 +262,7 @@ async function readKbFile(absPath: string, maxBytes?: number): Promise<{
   truncated: boolean;
   totalBytes: number;
 }> {
-  const cap = maxBytes ?? KB_READ_MAX_BYTES;
+  const cap = maxBytes ?? RAG_KB_READ_MAX_BYTES;
   const extension = extname(absPath).toLowerCase();
   if (BINARY_DOC_EXTS.has(extension) || extension === ".html" || extension === ".htm") {
     const { text } = await extractText(absPath);

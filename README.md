@@ -43,7 +43,7 @@ Local hybrid RAG pipeline for the [Pi coding agent](https://github.com/badlogic/
 - **Tracked paths + exclude patterns** — `/rag index <path>` remembers what to keep current; gitignore-style `/rag exclude` for `dist/`, `*.log`, etc.
 - **Auto-refresh** — stale index (>24 h) silently refreshed before the next agent turn; re-running `/rag index` on an already-indexed path refreshes it incrementally on demand
 - **Auto-injection** — relevant chunks appended after the user prompt before every agent turn (KV-cache friendly); off by default, auto-enables once the store has chunks
-- **4 AI tools** — `rag_index`, `rag_query`, `rag_status`, and `kb_read` (resolve a filename/`[[wikilink]]` to an indexed file and read it) for the agent to call directly
+- **4 AI tools** — `rag_index`, `rag_query`, `rag_status`, and `rag_kb_read` (resolve a filename/`[[wikilink]]` to an indexed file and read it) for the agent to call directly
 
 ## Install
 
@@ -163,7 +163,7 @@ The extension registers four tools the agent can call directly:
 - **`rag_index`** — Index a path into the pipeline (also adds it to tracked paths)
 - **`rag_query`** — Hybrid BM25 + vector search; returns cwd-relative file paths + line numbers + previews + scores
 - **`rag_status`** — Index stats, RAG config, storage path + scope
-- **`kb_read`** — Resolve a note reference to an indexed file and return its content. Handles `[[wikilink]]`, `[[Foo|alias]]`, `[[Foo#Heading]]`, bare names with or without extension (`Foo`, `Foo.md`), and relative paths (`docs/foo`) — so the agent can pull a file by name without running `find`/`grep` first. Multi-match references get a disambiguation prompt instead of guessing. PDF/DOCX/HTML are decoded to text (via the same extraction pipeline used for indexing); plain text is read with a UTF-8-safe reader capped at 64 KiB
+- **`rag_kb_read`** — Resolve a note reference to an indexed file and return its content. Handles `[[wikilink]]`, `[[Foo|alias]]`, `[[Foo#Heading]]`, bare names with or without extension (`Foo`, `Foo.md`), and relative paths (`docs/foo`) — so the agent can pull a file by name without running `find`/`grep` first. Multi-match references get a disambiguation prompt instead of guessing. PDF/DOCX/HTML are decoded to text (via the same extraction pipeline used for indexing); plain text is read with a UTF-8-safe reader capped at 64 KiB
 
 ## How It Works
 
@@ -225,7 +225,7 @@ src/file-discovery.ts       sync/async directory walkers, tracked-path expansion
 src/text-extraction.ts      extractText (plain/pdf/docx/html) + OCR fallback
 src/embedding.ts            dual ONNX pipelines (nomic + jina-code), batched inference
 src/search.ts               hybrid BM25 + dual-vector search
-src/kb-reader.ts            kb_read resolver: wikilink/basename→indexed file + content reader
+src/kb-reader.ts            rag_kb_read resolver: wikilink/basename→indexed file + content reader
 src/indexing.ts             indexFiles pipeline (parallel reads → per-model embed batches → tx writes)
 src/extension/              Pi wiring: progress UI, path display, hooks, /rag command, tools
 types/                      ambient type declarations for untyped dependencies

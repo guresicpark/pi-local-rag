@@ -1,6 +1,6 @@
 /**
- * End-to-end verification of the kb_read tool: registers the real tool set
- * through registerRagTools() and drives the kb_read execute handler against
+ * End-to-end verification of the rag_kb_read tool: registers the real tool set
+ * through registerRagTools() and drives the rag_kb_read execute handler against
  * a seeded SQLite store, covering resolution tiers, disambiguation, empty
  * index, truncation, and PDF decoding.
  */
@@ -60,8 +60,8 @@ beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), "pi-rag-kb-e2e-"));
   process.env.PI_RAG_DIR = tmp;
   saveConfig({ ...defaultConfig(), trackedPaths: [tmp] });
-  kbRead = captureTools().kb_read;
-  expect(kbRead, "kb_read tool should be registered").toBeTruthy();
+  kbRead = captureTools().rag_kb_read;
+  expect(kbRead, "rag_kb_read tool should be registered").toBeTruthy();
 });
 
 afterEach(async () => {
@@ -75,13 +75,13 @@ afterAll(() => {
   else delete process.env.PI_RAG_DIR;
 });
 
-/** Invoke the kb_read execute handler with a session cwd = the store root. */
+/** Invoke the rag_kb_read execute handler with a session cwd = the store root. */
 async function call(name: string, maxBytes?: number): Promise<{ content: Array<{ text: string }>; details: any }> {
   const params = maxBytes === undefined ? { name } : { name, max_bytes: maxBytes };
   return kbRead.execute("call-1", params, undefined, undefined, { cwd: tmp });
 }
 
-describe("kb_read tool end-to-end", () => {
+describe("rag_kb_read tool end-to-end", () => {
   it("resolves a note by basename and returns its content with a header", async () => {
     seedFiles([{ rel: "notes/hybrid-search.md", content: "# Hybrid search\n\nFull body here.\n" }]);
     const result = await call("hybrid-search");

@@ -1,5 +1,5 @@
 /**
- * kb_read resolver tests — ported from pi-knowledge-search's kb-reader.test.ts
+ * rag_kb_read resolver tests — ported from pi-knowledge-search's kb-reader.test.ts
  * (adapted from node:test to vitest) plus buildIndexedFiles coverage for the
  * pi-local-rag tracked-paths → IndexedFile bridging.
  */

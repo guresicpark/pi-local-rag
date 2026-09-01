@@ -30,7 +30,7 @@
  * /rag ext reset        → restore default extensions
  * /rag help             → show all /rag commands
  *
- * Tools: rag_index, rag_query, rag_status
+ * Tools: rag_index, rag_query, rag_status, kb_read
  *
  * Implementation is split across (see src/):
  *   src/constants.ts        — shared constants, dual model ids, ext groups, size limits
@@ -45,6 +45,7 @@
  *   src/text-extraction.ts  — extractText (txt/pdf/docx/html) + OCR fallback
  *   src/embedding.ts        — dual ONNX pipelines (nomic + jina-code)
  *   src/search.ts           — cosineSimilarity, normalize, hybridSearch, splitResultQuotas
+ *   src/kb-reader.ts        — kb_read resolver: wikilink/basename→indexed file + content reader
  *   src/indexing.ts         — indexFiles (parallel reads, per-model embed batches)
  *   src/extension/*         — Pi extension wiring (UI, hooks, /rag command, tools)
  *   index.ts                — extension entry point (this file) + re-exports
@@ -77,6 +78,12 @@ export {
 } from "./src/database.ts";
 export { sha256 } from "./src/hashing.ts";
 export { chunkText } from "./src/chunking.ts";
+export {
+  normalizeRef, resolveNote, readNote, buildIndexedFiles,
+} from "./src/kb-reader.ts";
+export type {
+  IndexedFile, ResolveMatch, ResolveResult, ReadNoteOptions, ReadNoteResult,
+} from "./src/kb-reader.ts";
 export {
   collectFiles, collectFilesAsync, collectFromTracked, collectFromTrackedAsync,
   isExcludedByConfig,
@@ -130,6 +137,6 @@ export default function piLocalRagExtension(pi: ExtensionAPI) {
     handler: createRagCommandHandler(),
   });
 
-  // Tools: rag_index, rag_query, rag_status.
+  // Tools: rag_index, rag_query, rag_status, kb_read.
   registerRagTools(pi);
 }

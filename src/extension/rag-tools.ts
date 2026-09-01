@@ -4,16 +4,24 @@
  * plain-text results for the model.
  */
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, extname } from "node:path";
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getRagDir } from "../store-paths.ts";
-import { loadConfig, saveConfig } from "../config.ts";
-import { getIndexStats, withDb } from "../database.ts";
+import { loadConfig, saveConfig, resolveExtensions } from "../config.ts";
+import { getIndexStats, withDb, getIndexedPaths } from "../database.ts";
 import { collectFiles } from "../file-discovery.ts";
 import { hybridSearch } from "../search.ts";
 import { indexFiles } from "../indexing.ts";
+import { resolveNote, readNote, buildIndexedFiles } from "../kb-reader.ts";
+import { extractText } from "../text-extraction.ts";
+import { BINARY_DOC_EXTS } from "../constants.ts";
 import { storeScope, displayPath } from "./paths.ts";
+
+/** Default note-like extensions when the effective allowlist is empty. */
+const KB_READ_FALLBACK_EXTS = [".md", ".txt"];
+/** Read cap for kb_read (post-UTF8 bytes). Mirrors the pi-knowledge-search default. */
+const KB_READ_MAX_BYTES = 64 * 1024;
 
 /** Register all three RAG tools on the extension API. */
 export function registerRagTools(pi: Pick<ExtensionAPI, "registerTool">) {
@@ -129,4 +137,142 @@ export function registerRagTools(pi: Pick<ExtensionAPI, "registerTool">) {
       return { content: [{ type: "text" as const, text: statusText }], details: undefined };
     },
   });
+
+  pi.registerTool({
+    name: "kb_read",
+    label: "KB Read",
+    description:
+      "Read an indexed file from the pi-local-rag knowledge base by name, relative path, or [[wikilink]]. Resolves fuzzy references without needing an absolute path — use this when you know a file's name but not its full path on disk. PDF/DOCX/HTML files are decoded to text.",
+    promptGuidelines: [
+      "Use kb_read when a file is referenced by name or [[wikilink]] — don't run find/grep first.",
+      "Use the standard `read` tool for non-indexed files or when you already have an absolute path.",
+    ],
+    parameters: Type.Object({
+      name: Type.String({
+        description:
+          "Note reference: filename, basename, relative path, or [[wikilink]]. Examples: 'docs/hybrid-search', 'Hybrid search.md', '[[Hybrid search]]', '[[docs/hybrid-search|alias]]'.",
+      }),
+      max_bytes: Type.Optional(
+        Type.Number({
+          description: "Truncate output to at most this many bytes (default 65536).",
+        }),
+      ),
+    }),
+    execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+      const config = loadConfig();
+      const cwd = ctx?.cwd ?? process.cwd();
+
+      const outcome = await withDb(async (database) => {
+        if (!getIndexStats(database).totalChunks) return { empty: true as const };
+        const paths = getIndexedPaths(database);
+        const fileExtensions = [...resolveExtensions(config)];
+        const indexedFiles = buildIndexedFiles({
+          paths,
+          roots: config.trackedPaths,
+          cwd,
+        });
+        const result = resolveNote(params.name, indexedFiles, {
+          fileExtensions: fileExtensions.length ? fileExtensions : KB_READ_FALLBACK_EXTS,
+          cwd,
+        });
+        return { empty: false as const, result };
+      });
+      if (outcome.empty) {
+        return {
+          content: [{ type: "text" as const, text: "pi-local-rag index is empty. Run rag_index first." }],
+          details: undefined,
+        };
+      }
+
+      const result = outcome.result;
+      if (result.matches.length === 0) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `No indexed file matched "${result.normalizedRef}". Try rag_query with a topic query to find related files.`,
+          }],
+          details: undefined,
+        };
+      }
+
+      if (!result.unique && result.matches.length > 1) {
+        const home = process.env.HOME || "";
+        const listed = result.matches
+          .map((m, i) => {
+            const display = home && m.absPath.startsWith(home) ? m.absPath.replace(home, "~") : m.absPath;
+            return `${i + 1}. ${display}  _(${m.reason})_`;
+          })
+          .join("\n");
+        return {
+          content: [{
+            type: "text" as const,
+            text:
+              `"${result.normalizedRef}" is ambiguous. ${result.matches.length} candidates:\n\n${listed}\n\n` +
+              `Call kb_read again with a more specific path (e.g. the exact relative path) to disambiguate.`,
+          }],
+          details: { candidates: result.matches.map((m) => m.absPath) },
+        };
+      }
+
+      const match = result.matches[0];
+      let note;
+      try {
+        note = await readKbFile(match.absPath, params.max_bytes);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: "text" as const, text: `Failed to read ${match.absPath}: ${msg}` }],
+          details: undefined,
+        };
+      }
+
+      const home = process.env.HOME || "";
+      const display = home && note.path.startsWith(home) ? note.path.replace(home, "~") : note.path;
+      const truncNote = note.truncated
+        ? `\n\n_(truncated: showing first ${note.content.length} of ${note.totalBytes} bytes)_`
+        : "";
+      const section = result.subheading ? ` — section "${result.subheading}"` : "";
+      // When a single low-confidence match slips through (fuzzy substring), flag
+      // the reason so the agent can decide whether to trust the result or refine
+      // the reference. High-confidence tiers are resolved silently.
+      const fuzzyNote = !result.unique
+        ? `\n\n_(fuzzy match via ${match.reason} — if this isn't the file you meant, re-run kb_read with a more specific path)_`
+        : "";
+      const header = `# ${display}${section}${truncNote}${fuzzyNote}\n\n`;
+
+      return {
+        content: [{ type: "text" as const, text: header + note.content }],
+        details: {
+          resolvedPath: match.absPath,
+          truncated: note.truncated,
+        },
+      };
+    },
+  });
+}
+
+/**
+ * Read an indexed file for kb_read. Binary documents (PDF/DOCX) and HTML go
+ * through extractText() so the model gets decoded content instead of raw
+ * bytes; plain text files are read with the UTF-8-safe readNote().
+ */
+async function readKbFile(absPath: string, maxBytes?: number): Promise<{
+  path: string;
+  content: string;
+  truncated: boolean;
+  totalBytes: number;
+}> {
+  const cap = maxBytes ?? KB_READ_MAX_BYTES;
+  const extension = extname(absPath).toLowerCase();
+  if (BINARY_DOC_EXTS.has(extension) || extension === ".html" || extension === ".htm") {
+    const { text } = await extractText(absPath);
+    const truncated = text.length > cap;
+    return {
+      path: absPath,
+      content: truncated ? text.slice(0, cap) : text,
+      truncated,
+      totalBytes: text.length,
+    };
+  }
+  return readNote(absPath, { maxBytes: cap });
 }

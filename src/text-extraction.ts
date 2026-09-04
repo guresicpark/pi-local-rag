@@ -142,10 +142,22 @@ export async function extractText(filePath: string): Promise<ExtractedText> {
   if (extension === ".pdf") {
     const rawBytes = readFileSync(filePath);
     const { getDocumentProxy, extractText: extractPdfText } = await import("unpdf");
-    // unpdf's bundled pdfjs insists on a plain Uint8Array (it rejects
-    // Buffer instances) — wrap the buffer in a zero-copy Uint8Array view.
-    const pdfBytes = new Uint8Array(rawBytes.buffer, rawBytes.byteOffset, rawBytes.byteLength);
-    const pdfDocument = await getDocumentProxy(pdfBytes);
+    // pdfjs's getDocument TRANSFERS the ArrayBuffer it is given to its
+    // worker, detaching it — any other view over the same buffer (including
+    // the source Buffer) drops to length 0 afterwards. Hand it a copy so
+    // rawBytes stays intact for the OCR fallback and hashing below. The
+    // copy also satisfies unpdf's bundled pdfjs, which rejects Buffer
+    // instances in favour of plain Uint8Arrays.
+    const pdfBytes = new Uint8Array(rawBytes);
+    // Document loading parses embedded fonts and emits the bulk of pdfjs's
+    // warnings ("TT: undefined function", standard-font fallbacks, …), so it
+    // runs inside the same silencing wrapper as text extraction. When
+    // pdfjs-dist is installed alongside unpdf, unpdf resolves
+    // standardFontDataUrl/cMapUrl from it automatically; pass quiet flags as
+    // a belt-and-braces fallback for installs without it.
+    const pdfDocument = await withPdfjsConsoleSilenced(() =>
+      getDocumentProxy(pdfBytes, { useSystemFonts: true }),
+    );
     const { totalPages, text } = await withPdfjsConsoleSilenced(() =>
       extractPdfText(pdfDocument, { mergePages: true }),
     );

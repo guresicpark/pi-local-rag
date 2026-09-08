@@ -71,7 +71,7 @@
     "@huggingface/transformers": "^4.2.0",
     "ignore": "^7.0.5",
     "mammoth": "^1.8.0",
-    "pdfjs-dist": "6.1.200",
+    "pdfjs-dist": "6.3.289",
     "sqlite-vec": "^0.1.9",
     "turndown": "^7.2.4",
     "unpdf": "^1.8.1"

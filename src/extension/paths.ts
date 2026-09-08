@@ -2,7 +2,8 @@
  * Path and store-scope helpers for presenting indexed files to the user
  * (and to the model) in cwd-relative form.
  */
-import { relative, isAbsolute, sep } from "node:path";
+import { homedir } from "node:os";
+import { join, relative, isAbsolute, sep } from "node:path";
 import { GLOBAL_RAG_DIR } from "../store-paths.ts";
 
 /** "project" for a cwd-scoped store, "global" for the home-dir fallback. */
@@ -23,4 +24,15 @@ export function isUnderRoot(filePath: string, root: string): boolean {
  */
 export function displayPath(filePath: string, cwd: string): string {
   return isUnderRoot(filePath, cwd) ? relative(cwd, filePath) : filePath;
+}
+
+/**
+ * Expand a leading `~` / `~/…` to the user's home directory. Command args
+ * reach the extension without shell expansion, so `/rag index ~/notes`
+ * would otherwise resolve to a literal `<cwd>/~/notes` path.
+ */
+export function expandTildePath(pathArgument: string): string {
+  if (pathArgument === "~") return homedir();
+  if (pathArgument.startsWith("~/")) return join(homedir(), pathArgument.slice(2));
+  return pathArgument;
 }

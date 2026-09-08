@@ -18,6 +18,7 @@
  *
  * /rag                  → show index stats (toggle)
  * /rag index <path>     → index a new path; refresh paths that already have chunks
+ * /rag remove <path>    → untrack a path and flush its chunks from the index
  * /rag search <query>   → hybrid search (BM25 + vector)
  * /rag find <glob>      → list indexed files matching a glob
  * /rag rebuild          → re-embed all tracked files (forced re-embed)
@@ -131,7 +132,7 @@ export default function piLocalRagExtension(pi: ExtensionAPI) {
 
   // The /rag command.
   pi.registerCommand("rag", {
-    description: "pi-local-rag: /rag (status)|index|search|find|rebuild [--force]|clear|exclude|on|off|ext",
+    description: "pi-local-rag: /rag (status)|index|remove|search|find|rebuild [--force]|clear|exclude|on|off|ext",
     getArgumentCompletions: (prefix: string): AutocompleteItem[] | null =>
       getRagSubcommandCompletions(prefix),
     handler: createRagCommandHandler(),

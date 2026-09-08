@@ -30,7 +30,7 @@ import {
 import { hybridSearch } from "../search.ts";
 import { indexFiles } from "../indexing.ts";
 import * as sqlRepository from "../repository.ts";
-import { storeScope, displayPath, isUnderRoot } from "./paths.ts";
+import { storeScope, displayPath, isUnderRoot, expandTildePath } from "./paths.ts";
 import { createIndexProgressRenderer, type RagUi } from "./ui.ts";
 
 /** Context the command handlers receive from the Pi extension runtime. */
@@ -42,6 +42,7 @@ export interface RagCommandContext {
 /** Subcommand table for autocomplete and the help widget. */
 const RAG_SUBCOMMANDS: { value: string; label: string; description: string }[] = [
   { value: "index",    label: "index",    description: "Index a new path, or refresh paths that already have chunks" },
+  { value: "remove",   label: "remove",   description: "Stop tracking a path and flush its chunks from the index" },
   { value: "search",   label: "search",   description: "Search the index" },
   { value: "find",     label: "find",     description: "List indexed files matching a glob" },
   { value: "rebuild",  label: "rebuild",  description: "Re-embed tracked files (--force to skip hash check + wipe DB)" },
@@ -77,6 +78,12 @@ export function createRagCommandHandler() {
     // ── index (also refreshes already-indexed tracked paths) ──
     if (subcommand === "index") {
       await handleIndexSubcommand(parts, ctx);
+      return;
+    }
+
+    // ── remove (inverse of index: untrack + flush chunks) ──
+    if (subcommand === "remove") {
+      await handleRemoveSubcommand(parts, ctx);
       return;
     }
 
@@ -155,15 +162,17 @@ export function createRagCommandHandler() {
 // ─── /rag index ─────────────────────────────────────────────────────────────
 
 async function handleIndexSubcommand(parts: string[], ctx: RagCommandContext) {
-  const pathArgument = parts[1] || ".";
+  // Relative arguments resolve against the session cwd (ctx.cwd), not the
+  // process cwd — the runtime's cwd is authoritative (e.g. after /cd).
+  const pathArgument = resolve(ctx.cwd ?? process.cwd(), expandTildePath(parts[1] || "."));
   if (!existsSync(pathArgument)) {
-    ctx.ui.notify(`Path not found: ${pathArgument}`, "error");
+    ctx.ui.notify(`Path not found: ${parts[1]}`, "error");
     return;
   }
   // Anchor a project-local store at cwd if there isn't one in scope yet.
   getRagDir({ createIfMissing: true });
   const config = loadConfig();
-  const absolutePath = resolve(pathArgument);
+  const absolutePath = pathArgument;
   if (!config.trackedPaths.includes(absolutePath)) {
     config.trackedPaths.push(absolutePath);
     saveConfig(config);
@@ -239,6 +248,60 @@ async function handleIndexSubcommand(parts: string[], ctx: RagCommandContext) {
     saveConfig(config);
     ctx.ui.notify("RAG auto-injection enabled", "info");
   }
+}
+
+// ─── /rag remove ────────────────────────────────────────────────────────────
+
+/**
+ * Inverse of `/rag index <path>`: drop the path — and every tracked path
+ * nested under it — from the config, then flush all indexed data (chunks,
+ * both vector tables, file rows) for files under it. FTS rows follow the
+ * chunk deletes via the store's sync triggers; injection stays enabled but
+ * no-ops on its own once the store is empty.
+ */
+async function handleRemoveSubcommand(parts: string[], ctx: RagCommandContext) {
+  const pathArgument = parts[1];
+  if (!pathArgument) {
+    ctx.ui.notify("Usage: /rag remove <path>", "warning");
+    return;
+  }
+  // The path may no longer exist on disk — remove must still work then, so
+  // unlike /rag index there is no existsSync gate here. Relative arguments
+  // resolve against the session cwd, mirroring /rag index.
+  const absolutePath = resolve(ctx.cwd ?? process.cwd(), expandTildePath(pathArgument));
+
+  const config = loadConfig();
+  const removedTrackedPaths = config.trackedPaths.filter(trackedPath => isUnderRoot(trackedPath, absolutePath));
+  if (removedTrackedPaths.length) {
+    config.trackedPaths = config.trackedPaths.filter(trackedPath => !removedTrackedPaths.includes(trackedPath));
+    saveConfig(config);
+  }
+
+  const flushed = await withDb(database =>
+    sqlRepository.runInTransaction(database, () => {
+      const affectedFileRows = sqlRepository.listFiles(database).filter(fileRow => isUnderRoot(fileRow.path, absolutePath));
+      let flushedChunks = 0;
+      for (const fileRow of affectedFileRows) {
+        flushedChunks += fileRow.chunks;
+        sqlRepository.deleteVectorsForFile(database, fileRow.path);
+        sqlRepository.deleteCodeVectorsForFile(database, fileRow.path);
+        sqlRepository.deleteChunksForFile(database, fileRow.path);
+        sqlRepository.deleteFile(database, fileRow.path);
+      }
+      return { flushedFiles: affectedFileRows.length, flushedChunks };
+    }),
+  );
+
+  if (!removedTrackedPaths.length && !flushed.flushedFiles) {
+    ctx.ui.notify(`Nothing to remove: ${parts[1]} is not tracked and has no indexed chunks.`, "warning");
+    return;
+  }
+
+  ctx.ui.notify(
+    `✅ Removed ${parts[1]}: ${removedTrackedPaths.length} tracked path(s) untracked · ` +
+    `${flushed.flushedFiles} file(s) / ${flushed.flushedChunks} chunk(s) flushed from the index`,
+    "info",
+  );
 }
 
 // ─── /rag search ────────────────────────────────────────────────────────────
@@ -535,6 +598,7 @@ function handleHelpSubcommand(ctx: RagCommandContext) {
   const padRight = (text: string, width: number) => text + " ".repeat(Math.max(0, width - text.length));
   const commandDescriptions: [string, string][] = [
     ["/rag index <path>",       "Index a new path, or refresh paths that already have chunks"],
+    ["/rag remove <path>",      "Untrack a path and flush all chunks stored for it"],
     ["/rag search <query>",     "Hybrid BM25 + vector search over the index"],
     ["/rag find <glob>",        "List indexed files matching a glob (e.g. *.ts, src/*)"],
     ["/rag",                    "Show index stats and active configuration (toggle)"],

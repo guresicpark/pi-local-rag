@@ -40,7 +40,7 @@ Local hybrid RAG pipeline for the [Pi coding agent](https://github.com/badlogic/
 - **Dual local ONNX embeddings** — code files are embedded by `jinaai/jina-embeddings-v2-base-code` (~170 MB quantized, trained on code + docstrings); everything else (prose, Markdown, data/config, PDF/DOCX/HTML) by `nomic-ai/nomic-embed-text-v1.5` (~111 MB quantized). Vectors live in separate `sqlite-vec` tables; each space is queried only when it has vectors, ranked by absolute cosine similarity (shared scale), and results total 7 in dual-space stores (5 otherwise) split between code and prose by each space's stored-vector ratio — all fully offline after first download
 - **Many file formats** — text, source code, Markdown, JSON, YAML, plus PDF (with optional OCR fallback for scanned docs), DOCX, HTML (auto-converted to Markdown)
 - **Per-project storage** — walks up from cwd looking for `.pi/rag/`; falls back to `~/.pi/rag/` global store
-- **Tracked paths + exclude patterns** — `/rag index <path>` remembers what to keep current; gitignore-style `/rag exclude` for `dist/`, `*.log`, etc.
+- **Tracked paths + exclude patterns** — `/rag index <path>` remembers what to keep current; gitignore-style `/rag exclude` for `dist/`, `*.log`, etc.; `/rag remove <path>` untracks and flushes a path's data again
 - **Auto-refresh** — stale index (>24 h) silently refreshed before the next agent turn; re-running `/rag index` on an already-indexed path refreshes it incrementally on demand
 - **Auto-injection** — relevant chunks appended after the user prompt before every agent turn (KV-cache friendly); off by default, auto-enables once the store has chunks
 - **4 AI tools** — `rag_index`, `rag_query`, `rag_status`, and `rag_kb_read` (resolve a filename/`[[wikilink]]` to an indexed file and read it) for the agent to call directly
@@ -67,7 +67,8 @@ The OCR fallback is silent when these tools aren't installed (logs one stderr hi
 
 | Command | Description |
 |---|---|
-| `/rag index <path>` | Index a file or directory (chunks → embeds → stores) and add it to tracked paths. If the path already has indexed chunks, re-walks tracked paths and refreshes new/changed files instead |
+| `/rag index <path>` | Index a file or directory (chunks → embeds → stores) and add it to tracked paths. If the path already has indexed chunks, re-walks tracked paths and refreshes new/changed files instead. Accepts `~`-expanded and cwd-relative paths |
+| `/rag remove <path>` | Inverse of `index`: untrack the path (and anything nested under it) and flush all chunks, vectors, and file rows stored for it from the index. Same path syntax as `index`; also works when the path no longer exists on disk |
 | `/rag search <query>` | Hybrid BM25 + vector search over the index |
 | `/rag find <glob>` | List indexed files matching a glob (e.g. `*.ts`, `src/*`) |
 | `/rag` | Show index stats, active config, tracked paths, exclude patterns, storage scope (run again to hide) |
@@ -95,6 +96,11 @@ Embedding  ███████████████████████
 code  1610/1610  jina-code
 text   237/237   nomic
 ✅ Indexed 412 files (1,847 chunks: 1610 code · 237 text) · 0 unchanged · 38.4s · tracking 1 path(s) · project store
+
+$ /rag index ../shared-libs
+Found 37 files to index
+...
+✅ Indexed 37 files (203 chunks: 174 code · 29 text) · 0 unchanged · 3.1s · tracking 2 path(s) · project store
 
 $ /rag
 🔍 pi-local-rag
@@ -152,6 +158,15 @@ Rebuilding 415 files...
 Rebuilding  ████████████████████████  100%
 Embedding   ████████████████████████  100%  1847/1847 chunks
 ✅ Rebuilt: 3 re-indexed · 412 unchanged · 0 deleted · 1850 chunks · 14.2s
+
+$ /rag remove ../shared-libs
+✅ Removed ../shared-libs: 1 tracked path(s) untracked · 37 file(s) / 203 chunk(s) flushed from the index
+
+$ /rag remove ~/code/old-project
+✅ Removed ~/code/old-project: 2 tracked path(s) untracked · 118 file(s) / 512 chunk(s) flushed from the index
+
+$ /rag remove ~/code/my-app
+Nothing to remove: ~/code/my-app is not tracked and has no indexed chunks.
 ```
 
 > Output above is approximate — actual colors, spacing, and widget layout depend on your terminal theme and the Pi agent's UI.
